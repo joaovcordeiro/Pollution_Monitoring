@@ -1,14 +1,15 @@
 #include "SIM800LModule.h"
+#include "credentials.h"
 
-// Configuração da chave de API do ThingSpeak
-const char* apiKey = "U7QJ6FTL2G47KTO5";  
-const char* server = "api.thingspeak.com";
-// const char* apiKey2 = "LVCL59C5YTFG13V9";  // Substitua pela sua chave de API do segundo canal
+// // Configuração da chave de API do ThingSpeak
+// const char* apiKey = "U7QJ6FTL2G47KTO5";  
+// const char* server = "api.thingspeak.com";
+// // const char* apiKey2 = "LVCL59C5YTFG13V9";  // Substitua pela sua chave de API do segundo canal
 
-// Configuração do ponto de acesso da rede, configurar conforme o chip utilizado
-const char apn[] = "zap.vivo.com.br";        
-const char gprsUser[] = "vivo";            
-const char gprsPass[] = "vivo";           
+// // Configuração do ponto de acesso da rede, configurar conforme o chip utilizado
+// const char apn[] = "zap.vivo.com.br";        
+// const char gprsUser[] = "vivo";            
+// const char gprsPass[] = "vivo";           
 
 
 SIM800LModule::SIM800LModule() 
