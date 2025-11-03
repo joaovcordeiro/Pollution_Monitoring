@@ -310,8 +310,8 @@ static bool synchronize_time_with_ntp() {
 static bool connect_aws_iot() {
 
     // Log de Heap: Para depurar falhas de alocação de memória SSL
-    SerialMon.printf("CommManager: Free Heap before SSL config: %u\n", ESP.getFreeHeap());
-    SerialMon.println(F("CommManager: Configuring SSL/TLS for AWS IoT..."));
+    SerialMon.printf("CommManager: Free Heap antes da configuração SSL: %u\n", ESP.getFreeHeap());
+    SerialMon.println(F("CommManager: Configurando SSL/TLS para o AWS IoT..."));
 
     // 1. Configura os certificados para o cliente SSL
     ssl_client.setCACert(AWS_IOT_ROOT_CA);
@@ -349,24 +349,25 @@ static bool connect_aws_iot() {
 
 
 /**
- * @brief Publica os dados dos sensores para o AWS IoT Core.
- * @param scd40_data Referência para a estrutura com os dados do SCD40.
- * // Adicionar parâmetros para outros sensores conforme necessário
- * @return true se a publicação for bem-sucedida, false caso contrário.
+ * @brief (Função Privada) Serializa todos os dados dos sensores em um JSON
+ * e o publica no tópico MQTT da AWS IoT.
+
+ * @return true se a publicação MQTT for bem-sucedida, false caso contrário.
  */
-bool publish_data(
+static bool publish_data(
     const SCD40_Data& scd40_data, 
     const MICS6814_Data& mics_data, 
     const DSM501A_Data& dsm_data, 
     const GPS_Data& gps_data) {
+
     if (!modem.isGprsConnected()) {
-         SerialMon.println(F("CommManager: GPRS not connected. Cannot publish."));
+         SerialMon.println(F("CommManager: GPRS não conectado. Não é possível publicar dados."));
          return false;
     }
     if (!mqtt_client.connected()) {
-        SerialMon.println(F("CommManager: MQTT client not connected. Attempting to reconnect..."));
+        SerialMon.println(F("CommManager: Cliente MQTT não conectado. Tentando reconexão..."));
         if (!connect_aws_iot()) { // Tenta reconectar ao MQTT
-            SerialMon.println(F("CommManager: Failed to reconnect MQTT. Cannot publish."));
+            SerialMon.println(F("CommManager: Falha ao reconectar MQTT. Não é possível publicar dados."));
             return false;
         }
     }
@@ -385,7 +386,7 @@ bool publish_data(
 
 
 
-    if (scd40_data.isValid) {
+     if (scd40_data.isValid) {
         JsonObject scd_json = jsonDoc["scd40"].to<JsonObject>();
         scd_json["co2"] = round(scd40_data.co2 * 100.0) / 100.0; 
         scd_json["temperature"] = round(scd40_data.temperature * 100.0) / 100.0;
@@ -423,8 +424,12 @@ bool publish_data(
 
     char jsonBuffer[1024];
     size_t n = serializeJson(jsonDoc, jsonBuffer);
+    if (n == 0) {
+        SerialMon.println(F("CommManager: FALHA CRÍTICA - serializeJson() falhou. (JSON > 1024 bytes?)"));
+        return false;
+    }
 
-    SerialMon.print(F("CommManager: Publishing message ("));
+    SerialMon.print(F("CommManager: Publicando mensagem ("));
     SerialMon.print(n);
     SerialMon.print(F(" bytes): "));
     SerialMon.println(jsonBuffer);
@@ -434,12 +439,12 @@ bool publish_data(
 
     if (mqtt_client.publish(AWS_IOT_PUBLISH_TOPIC, jsonBuffer)) { 
         SerialMon.println(AWS_IOT_PUBLISH_TOPIC);
-        SerialMon.println(F("CommManager: Message published successfully!"));
+        SerialMon.println(F("CommManager: Mensagem publicada no tópico com sucesso!"));
         mqtt_client.loop();
-        delay(2000);
+        delay(500);
         return true;
     } else {
-        SerialMon.print(F("CommManager: Failed to publish message. MQTT state: "));
+        SerialMon.print(F("CommManager: Falha ao publicar a mensagem. estado MQTT: "));
         SerialMon.println(mqtt_client.state());
         return false;
     }
@@ -447,8 +452,7 @@ bool publish_data(
 
 
 /**
- * @brief (Função Privada) Desconecta e desliga todas as camadas da rede 
- * de forma "graciosa" (graceful shutdown).
+ * @brief (Função Privada) Desconecta e desliga todas as camadas da rede.
  *
  * Desliga a pilha na ordem correta (de cima para baixo):
  * 1. MQTT (PubSubClient)
