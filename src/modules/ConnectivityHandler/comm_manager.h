@@ -10,63 +10,48 @@
 struct GPS_Data {
     float latitude = 0.0f;
     float longitude = 0.0f;
-    float hdop = 99.0f;
-    int satellites = 0;
+    float speed_kph = 99.0f;
+    float altitude = 0.0f;
+    int satellites_visible = 0;
+    int satellites_used = 0;
+    float accuracy = 0.0f;
     bool isValid = false;
 };
 
 /**
- * @brief Inicializa a comunicação serial com o modem.
- * Deve ser chamado uma vez no setup, após Serial.begin().
+ * @brief Inicializa a(s) porta(s) serial e os pinos de controle de hardware
+ * para comunicação com o modem.
+ *
+ * @note Esta função deve ser chamada apenas UMA VEZ no início do setup() global.
+ * Ela configura o pino PWRKEY e inicializa a SerialAT.
+ * O baud rate está definido como 115200, que é o padrão de fábrica
+ * para o SIM7000G, garantindo maior robustez e portabilidade.
  */
-void comm_manager_init_serial();
+void init_serial();
 
 /**
- * @brief Realiza a sequência completa para ligar, inicializar o modem e conectar à rede celular.
- * @return true se o modem foi configurado e conectado à rede com sucesso, false caso contrário.
+ * @brief Executa o ciclo de comunicação completo:
+ * 1. Liga o modem e conecta à rede celular.
+ * 2. Conecta GPRS e sincroniza o NTP (para o relógio e para o A-GPS).
+ * 3. Obtém a localização GPS (agora rápida, graças ao NTP).
+ * 4. Conecta ao AWS IoT (MQTT).
+ * 5. Publica os dados dos sensores.
+ * 6. Desconecta e desliga o modem de forma segura.
+ *
+ * @param scd_data Dados do sensor SCD40.
+ * @param mics_data Dados do sensor MICS6814.
+ * @param dsm_data Dados do sensor DSM501A.
+ * @param out_gps_data Referência para a struct GPS_Data, que será PREENCHIDA
+ * por esta função.
+ * @return true se a PUBLICAÇÃO dos dados foi bem-sucedida, false caso contrário.
  */
-bool comm_manager_setup_modem_and_network();
-
-/**
- * @brief Ativa o GPS do modem, tenta obter a localização e o desliga.
- * @param gps_data Referência para a estrutura onde os dados de GPS serão armazenados.
- * @param timeout_seconds Tempo máximo em segundos para tentar obter um fix.
- * @return true se a localização foi obtida com sucesso, false caso contrário.
- */
-bool comm_manager_get_gps_location(GPS_Data& gps_data, uint16_t timeout_seconds = 90);
+bool perform_communication_cycle(
+    const SCD40_Data& scd_data,
+    const MICS6814_Data& mics_data,
+    const DSM501A_Data& dsm_data,
+    GPS_Data& out_gps_data // Passado por referência para ser preenchido
+);
 
 
-/**
- * @brief Conecta à rede GPRS.
- * @return true se conectado com sucesso, false caso contrário.
- */
-bool comm_manager_connect_gprs();
-
-/**
- * @brief Conecta ao AWS IoT Core via MQTTs.
- * Pressupõe que a conexão GPRS já está ativa.
- * Configura os certificados SSL/TLS.
- * @return true se conectado com sucesso, false caso contrário.
- */
-bool comm_manager_connect_aws_iot();
-
-/**
- * @brief Publica os dados dos sensores para o AWS IoT Core.
- * @param scd40_data Referência para a estrutura com os dados do SCD40.
- * // Adicionar parâmetros para outros sensores conforme necessário
- * @return true se a publicação for bem-sucedida, false caso contrário.
- */
-bool comm_manager_publish_data(const SCD40_Data& scd40_data , const MICS6814_Data& mics_data, const DSM501A_Data& dsm_data, const GPS_Data& gps_data);
-
-/**
- * @brief Desconecta do MQTT, GPRS e desliga o modem.
- */
-void comm_manager_disconnect_and_powerdown_modem();
-
-/**
- * @brief Função de callback para mensagens MQTT recebidas.
- * (Implementação pode ser simples se não esperar comandos).
- */
-void comm_manager_mqtt_callback(char* topic, byte* payload, unsigned int length);
 
 #endif // COMM_MANAGER_H

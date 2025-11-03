@@ -22,322 +22,350 @@ static PubSubClient mqtt_client(ssl_client);
 
 // --- Implementação das Funções ---
 
+/**
+ * @brief Envia o pulso de energia para o pino PWRKEY para ligar o modem.
+ * @note Esta função APENAS envia o pulso, ela não espera o modem 
+ * inicializar. A espera deve ser feita pela função modem.restart() 
+ * ou modem.begin() que ativamente verifica a resposta AT.
+ */
 static void modemPowerOn() {
-    pinMode(MODEM_PWRKEY_PIN, OUTPUT);
-    SerialMon.println(F("CommManager: Powering on modem..."));
+    SerialMon.println(F("CommManager: Enviando pulso de 'power on' (1s)..."));
+
     digitalWrite(MODEM_PWRKEY_PIN, LOW);
     delay(100); 
     digitalWrite(MODEM_PWRKEY_PIN, HIGH);
     delay(1000); 
     digitalWrite(MODEM_PWRKEY_PIN, LOW);
-    SerialMon.println(F("CommManager: Modem power on sequence complete. Waiting for boot..."));
-    delay(5000); 
+
+    SerialMon.println(F("CommManager: Pulso de 'power on' enviado..."));
 }
 
+/**
+ * @brief Envia o pulso de energia para o pino PWRKEY para desligar o modem.
+ * @note A maioria dos modems SIMCOM requer um pulso um pouco mais longo 
+ * para desligar do que para ligar.
+ */
 static void modemPowerOff() {
-    pinMode(MODEM_PWRKEY_PIN, OUTPUT);
-    SerialMon.println(F("CommManager: Powering off modem..."));
+    SerialMon.println(F("CommManager: Enviando pulso de 'power off' (1s)..."));
+
     digitalWrite(MODEM_PWRKEY_PIN, LOW);
     delay(100);
     digitalWrite(MODEM_PWRKEY_PIN, HIGH);
-    delay(1200); 
+    delay(1000); 
     digitalWrite(MODEM_PWRKEY_PIN, LOW);
-    SerialMon.println(F("CommManager: Modem powered off."));
+
+    SerialMon.println(F("CommManager: Pulso de 'power off' enviado."));
 }
 
-/**
- * @brief Converts a tm struct (assumed to be in UTC) to a time_t epoch value.
- * This is a portable implementation of the non-standard timegm().
- * @param tm Pointer to the tm struct containing the UTC time.
- * @return The number of seconds since the epoch (1970-01-01 00:00:00 UTC).
- */
-static time_t timegm_custom(struct tm *tm) {
-    const int days_in_month[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-    long days = 0;
-    int year = tm->tm_year + 1900;
-
-    for (int y = 1970; y < year; ++y) {
-        days += 365 + ((y % 4 == 0 && y % 100 != 0) || (y % 400 == 0));
-    }
-    for (int m = 0; m < tm->tm_mon; ++m) {
-        days += days_in_month[m];
-        if (m == 1 && ((year % 4 == 0 && year % 100 != 0) || (year % 400 == 0))) {
-            days += 1; // Leap year
-        }
-    }
-    days += tm->tm_mday - 1;
-    return ((days * 24L + tm->tm_hour) * 60 + tm->tm_min) * 60 + tm->tm_sec;
-}
-
-/**
- * @brief Tenta obter a hora da rede celular e configurar a hora do sistema ESP32 para UTC.
- * @return true se a hora do sistema foi configurada com sucesso, false caso contrário.
- */
-static bool comm_manager_sync_system_time() {
-    int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
-    float timezone_offset_from_utc = 0; 
-    bool time_successfully_set_on_esp32 = false;
-
-    SerialMon.println(F("CommManager: Attempting to get network time for system sync..."));
+void init_serial() {
     
-    for (int i = 0; i < 3 && !time_successfully_set_on_esp32; i++) {
-        // For SIM7000, getNetworkTime() returns UTC when network time sync is enabled (AT+CLTS=1).
-        // The getNetworkUTCTime() is not implemented for this modem in TinyGSM.
-        if (modem.getNetworkTime(&year, &month, &day, &hour, &minute, &second, &timezone_offset_from_utc)) {
-            SerialMon.printf("CommManager: Network Time (from modem): Y:%04d M:%02d D:%02d H:%02d M:%02d S:%02d (TZ offset: %.1f)\n",
-                               year, month, day, hour, minute, second, timezone_offset_from_utc);
-            
-            if (year < 2025) { 
-                SerialMon.printf("CommManager: Network time year (%d) seems invalid or too old. Attempt %d/3.\n", year, i + 1);
-                delay(1000); 
-                continue; 
-            }
+    pinMode(MODEM_PWRKEY_PIN, OUTPUT);
+    digitalWrite(MODEM_PWRKEY_PIN, LOW);
 
-            struct tm tminfo; 
-            tminfo.tm_year = year - 1900; 
-            tminfo.tm_mon = month - 1;    
-            tminfo.tm_mday = day;
-            tminfo.tm_hour = hour;        
-            tminfo.tm_min = minute;
-            tminfo.tm_sec = second;
-            tminfo.tm_isdst = 0;              
-
-            // Use our custom, portable timegm() to convert UTC components to epoch time.
-            // This avoids all timezone-related issues with mktime().
-            time_t epoch_time = timegm_custom(&tminfo);
-
-            if (epoch_time == (time_t)-1) {
-                SerialMon.println(F("CommManager: ERROR - timegm_custom() failed to convert time."));
-            } else {
-                SerialMon.printf("CommManager: timegm_custom() success. Calculated epoch_time (UTC): %lu\n", (unsigned long)epoch_time);
-                struct timeval tv;
-                tv.tv_sec = epoch_time; 
-                tv.tv_usec = 0;         
-                
-                if (settimeofday(&tv, NULL) == 0) {
-                    SerialMon.println(F("CommManager: ESP32 System time (UTC) successfully set."));
-                    // Now, set the local timezone for functions like localtime() to work correctly.
-                    // For UTC-3, the POSIX string is "UTC+3".
-                    setenv("TZ", "UTC+3", 1);
-                    tzset();
-                    time_successfully_set_on_esp32 = true;
-
-                    time_t check_time;
-                    time(&check_time); 
-                    struct tm *ptm = gmtime(&check_time);
-                    char buffer_time_str[32];
-                    strftime(buffer_time_str, sizeof(buffer_time_str), "%Y-%m-%d %H:%M:%S UTC", ptm);
-                    SerialMon.print(F("CommManager: System time check (string after settimeofday): ")); SerialMon.println(buffer_time_str);
-                } else {
-                    SerialMon.println(F("CommManager: ERROR - settimeofday() failed."));
-                }
-            }
-        } else {
-            SerialMon.printf("CommManager: Failed to get network time on attempt %d/3.\n", i + 1);
-            delay(2000); 
-        }
-    } 
-
-    if (!time_successfully_set_on_esp32) {
-        SerialMon.println(F("CommManager: CRITICAL - Failed to set system time from network after all attempts. SSL/TLS handshake may fail."));
-    }
-    return time_successfully_set_on_esp32;
-}
-
-void comm_manager_init_serial() {
     SerialAT.begin(57600, SERIAL_8N1, MODEM_RX_PIN, MODEM_TX_PIN);
-    SerialMon.println(F("CommManager: SerialAT initialized for modem."));
-    delay(100); 
+
+    SerialMon.println(F("CommManager: SerialAT (57600) e pinos de controle inicializados."));
 }
 
-bool comm_manager_setup_modem_and_network() {
+/**
+ * @brief (Função Privada) Liga o modem, reinicia e aguarda o registro na rede.
+ * * @note Esta é a função principal de inicialização do modem, chamada a cada 
+ * despertar (wake-up) do deep sleep.
+ * @note Ela assume que init_serial() JÁ FOI CHAMADA
+ * uma vez no setup() global (em main.cpp) para configurar os pinos e a SerialAT.
+ * * @return true se o modem estiver ligado e registrado na rede, false caso contrário.
+ */
+static bool setup_modem_and_network() {
+    SerialMon.println(F("--- Iniciando Sequência de Modem ---"));
+
     modemPowerOn();
 
-    comm_manager_init_serial();
+    SerialMon.println(F("CommManager: Reiniciando modem (TinyGSM) e aguardando boot..."));
 
-    SerialMon.println(F("CommManager: Initializing modem with TinyGSM..."));
-    if (!modem.begin()) { 
-        SerialMon.println(F("CommManager: Failed to initialize modem with TinyGSM!"));
+    if (!modem.restart()) {
+        SerialMon.println(F("CommManager: Falha ao reiniciar modem (não respondeu aos comandos AT)!"));
+        
+        modemPowerOff(); 
         return false;
     }
 
     String modemInfo = modem.getModemInfo();
-    SerialMon.print(F("CommManager: Modem Info: "));
+    SerialMon.print(F("CommManager: Informação do Modem: "));
     SerialMon.println(modemInfo);
 
-
-    SerialMon.println(F("CommManager: Waiting for network registration..."));
+    SerialMon.println(F("CommManager: Aguardando registro na rede (max 3 min)..."));
     if (!modem.waitForNetwork(180000L)) { 
-        SerialMon.println(F("CommManager: Failed to connect to cellular network."));
+        SerialMon.println(F("CommManager: Falha ao registrar na rede celular."));
+        modemPowerOff();
         return false;
     }
-    SerialMon.println(F("CommManager: Cellular network connected."));
-    SerialMon.print(F("CommManager: Signal quality: "));
+    SerialMon.println(F("CommManager: Rede celular registrada."));
+    SerialMon.print(F("CommManager: Qualidade do Sinal (CSQ 0-31): "));
     SerialMon.println(modem.getSignalQuality());
-
 
     return true;
 }
 
-static void parseGpsResponse(String response, bool &fixStatus, String &utc, float &lat, float &lon, float &alt, float &speed_kph) {
-    int dataStartIndex = response.indexOf(":") + 1;
-    String data = response.substring(dataStartIndex);
-    data.trim();
-
-    int lastIndex = 0;
-    int commaIndex = 0;
-    String fieldValue;
-
-    // O formato de +CGNSINF é:
-    // <GNSS run status>,<Fix status>,<UTC datetime>,<Latitude>,<Longitude>,<MSL Altitude>,<Speed Over Ground>...
-    for (int i = 0; i < 7; i++) {
-        commaIndex = data.indexOf(',', lastIndex);
-        if (commaIndex == -1) {
-            commaIndex = data.length();
-        }
-        fieldValue = data.substring(lastIndex, commaIndex);
-        lastIndex = commaIndex + 1;
-
-        switch (i) {
-            case 0: break; // <GNSS run status>
-            case 1: fixStatus = (fieldValue.toInt() == 1); break;
-            case 2: utc = fieldValue; break;
-            case 3: lat = fieldValue.toFloat(); break;
-            case 4: lon = fieldValue.toFloat(); break;
-            case 5: alt = fieldValue.toFloat(); break;
-            case 6: speed_kph = fieldValue.toFloat(); break; // Velocidade em Km/h
-        }
-    }
-}
-
-bool comm_manager_get_gps_location(GPS_Data& gps_data, uint16_t timeout_seconds) {
+/**
+ * @brief (Função Privada) Tenta obter uma localização GPS válida do modem.
+    // 5. Desliga fisicamente o modem
+ *
+ * Esta função liga o GPS, faz um loop de "polling" (sondagem) por um
+ * período de timeout e tenta obter um "fix" válido.
+ *
+ * @note Ela assume que o NTP já foi sincronizado (em uma etapa anterior)
+ * para permitir um "Hot Start" rápido (TTFF de ~30s).
+ *
+ * @param gps_data Referência para a struct GPS_Data que será preenchida.
+ * @param timeout_seconds Duração máxima em segundos para tentar obter o "fix".
+ * @return true se um "fix" válido foi obtido, false caso contrário.
+ */
+bool get_gps_location(GPS_Data& gps_data, uint16_t timeout_seconds) {
     gps_data.isValid = false;
-    Serial.println(F("Ativando GPS com AT+CGNSPWR=1..."));
+    Serial.println(F("CommManager: Habilitando GPS ..."));
 
-    // Liga a energia do GPS
-    modem.sendAT("+CGNSPWR=1");
+    modem.sendAT(F("+SGPIO=0,4,1,1"));
     if (modem.waitResponse() != 1) {
-        Serial.println(F("Falha ao ligar o GPS (SGPIO também pode ser uma opção)."));
-        // Poderíamos tentar o SGPIO aqui como fallback se quiséssemos
+        SerialMon.println(F("CommManager: AVISO - Comando SGPIO (ligar antena) falhou."));
+    }
+
+    SerialMon.println(F("CommManager: Habilitando GPS (Etapa 2: Rádio)..."));
+    if (!modem.enableGPS()) {
+        SerialMon.println(F("CommManager: Falha ao ligar o módulo GPS (AT+CGNSPWR=1)."));
+        // Se a habilitação do rádio falhar, desliga a antena
+        modem.sendAT(F("+SGPIO=0,4,1,0")); 
+        modem.waitResponse();
         return false;
     }
-    Serial.println(F("GPS ativado. Tentando obter localização via polling com AT+CGNSINF..."));
+
+    SerialMon.print(F("CommManager: GPS habilitado. Aguardando 'fix' (timeout: "));
+
+    SerialMon.print(timeout_seconds);
+
+    SerialMon.println(F("s)..."));
 
     unsigned long start_time = millis();
     bool got_fix = false;
 
-    while (millis() - start_time < (unsigned long)timeout_seconds * 10) {
-        modem.sendAT("+CGNSINF");
-        String rawResponse = "";
-        if (modem.waitResponse(2000L, rawResponse) == 1 && rawResponse.indexOf("+CGNSINF:") != -1) {
-            
-            bool fix = false;
-            String utc = "";
-            float lat = 0.0, lon = 0.0, alt = 0.0, speed = 0.0;
-            
-            parseGpsResponse(rawResponse, fix, utc, lat, lon, alt, speed);
+    while (millis() - start_time < (unsigned long)timeout_seconds * 1000) {
 
-            if (fix) {
-                Serial.println(F("\n--- FIX VÁLIDO OBTIDO! ---"));
-                got_fix = true;
+        // 3. Pede os dados (TinyGSM envia AT+CGNSINF e faz o parse)
+        if (modem.getGPS(&gps_data.latitude, &gps_data.longitude, 
+                         &gps_data.speed_kph, &gps_data.altitude, 
+                         &gps_data.satellites_visible, &gps_data.satellites_used, 
+                         &gps_data.accuracy)) {
+
+            // A função getGPS() pode retornar true mas com dados 0.0 se não houver fix.
+            if (gps_data.latitude != 0.00 ) {
+                SerialMon.println(F("--- FIX VÁLIDO OBTIDO! ---"));
+                SerialMon.printf("Lat: %s, Lon: %s, Precisão: %s, Satélites Visiveis: %d, Satélites Utilizados: %d\n",
+                                 String(gps_data.latitude, 6).c_str(), 
+                                 String(gps_data.longitude, 6).c_str(),
+                                 String(gps_data.accuracy, 2).c_str(),
+                                 gps_data.satellites_visible, gps_data.satellites_used);
+                                 
                 gps_data.isValid = true;
-                gps_data.latitude = lat;
-                gps_data.longitude = lon;
-                // Os outros campos do +CGNSINF podem ser mapeados para a struct se necessário
-                // Ex: gps_data.hdop, gps_data.satellites etc.
-                break; // Sai do loop de tentativa
-            } else {
-                Serial.print(F("GPS respondeu, mas sem fix. "));
+                got_fix = true;
+                break; // Sucesso, sai do loop
             }
-        } else {
-            Serial.print(F("Aguardando resposta do modem... "));
         }
-        Serial.println("Tentando novamente em 5s.");
-        delay(5000);
+        
+        SerialMon.print(F(".")); // Imprime um ponto a cada tentativa
+        delay(5000); // Tenta a cada 5 segundos
     }
 
     if (!got_fix) {
         Serial.println(F("\nTimeout! Não foi possível obter um fix de GPS."));
     }
 
-    // Desliga a energia do GPS para economizar bateria
-    Serial.println(F("Desligando a energia do GPS com AT+CGNSPWR=0..."));
-    modem.sendAT("+CGNSPWR=0");
-    modem.waitResponse();
+    SerialMon.println(F("CommManager: Desabilitando o GPS..."));
+    modem.disableGPS();
 
     return gps_data.isValid;
 }
 
-bool comm_manager_connect_gprs() {
-    SerialMon.print(F("CommManager: Connecting to GPRS (APN: "));
+
+/**
+ * @brief (Função Privada) Estabelece a conexão GPRS (contexto PDP) usando
+ * as credenciais do config.
+ *
+ * @note Esta função é bloqueante e pode levar algum tempo (até o 
+ * timeout interno da TinyGSM) para conectar ou falhar.
+ *
+ * @return true se a conexão GPRS for estabelecida, false caso contrário.
+ */
+static bool connect_gprs() {
+    SerialMon.print(F("CommManager: Conectando ao GPRS (APN: "));
     SerialMon.print(APN);
     SerialMon.println(F(")..."));
 
     if (!modem.gprsConnect(APN, GPRS_USER, GPRS_PASS)) {
-        SerialMon.println(F("CommManager: GPRS connection failed."));
+        SerialMon.println(F("CommManager: Falha na conexão GPRS."));
         return false;
     }
-    SerialMon.println(F("CommManager: GPRS connected."));
-    SerialMon.print(F("CommManager: IP Address: "));
+
+    SerialMon.println(F("CommManager: GPRS conectado com sucesso."));
+    SerialMon.print(F("CommManager: Endereço IP Local: "));
     SerialMon.println(modem.getLocalIP());
     return true;
 }
 
-void comm_manager_mqtt_callback(char* topic, byte* payload, unsigned int len) {
-    SerialMon.print(F("CommManager: Message arrived ["));
+/**
+ * @brief (Função Privada/Callback) Chamada pela biblioteca PubSubClient
+ * sempre que uma mensagem é recebida em um tópico assinado.
+ *
+ * @note Esta função é essencial para qualquer funcionalidade "nuvem-para-dispositivo",
+ * como atualizações do AWS Device Shadow, comandos de reboot/OTA ou
+ * reconfiguração remota.
+ *
+ * @param topic O tópico MQTT no qual a mensagem foi recebida.
+ * @param payload O conteúdo (binário) da mensagem.
+ * @param len O comprimento (em bytes) do payload.
+ */
+static void mqtt_callback(char* topic, byte* payload, unsigned int len) {
+    SerialMon.print(F("CommManager: Mensagem recebida ["));
     SerialMon.print(topic);
     SerialMon.print(F("]: "));
-    for (unsigned int i = 0; i < len; i++) {
-        SerialMon.print((char)payload[i]);
-    }
-    SerialMon.println();
+
+
+    char msg_buffer[len + 1];
+
+    memcpy(msg_buffer, payload, len);
+
+    msg_buffer[len] = '\0';
+
+    SerialMon.println(msg_buffer);
 }
 
-bool comm_manager_connect_aws_iot() {
-   
-    if (!comm_manager_sync_system_time()) {
-        SerialMon.println(F("CommManager: Warning - Proceeding with MQTT connection attempt despite failed system time sync."));
+static bool synchronize_time_with_ntp() {
+    SerialMon.println(F("CommManager: Sincronizando NTP ..."));
+
+    if (!modem.NTPServerSync("pool.ntp.org", 0)) {
+        SerialMon.println(F("CommManager: AVISO - Comando NTPServerSync falhou."));
+    } else {
+        SerialMon.println(F("CommManager: Comando NTPServerSync enviado."));
     }
 
-    SerialMon.printf("CommManager: Free Heap before SSL config: %u\n", ESP.getFreeHeap()); // Verificar Heap
+    int ntp_year = 0, ntp_month = 0, ntp_day = 0;
+    int ntp_hour = 0, ntp_min = 0, ntp_sec = 0;
+    float ntp_timezone = 0.0f;
+
+    for (int8_t i = 5; i; i--) {
+        SerialMon.printf("CommManager: Tentando ler a hora do modem (tentativa %d/5)...\n", 6 - i);
+        
+        if (modem.getNetworkTime(&ntp_year, &ntp_month, &ntp_day, &ntp_hour,
+                                 &ntp_min, &ntp_sec, &ntp_timezone)) {
+            
+            SerialMon.println(F("============================================="));
+            SerialMon.println(F("CommManager: SUCESSO - modem.getNetworkTime()"));
+            SerialMon.printf("  Data: %d-%02d-%02d\n", ntp_year, ntp_month, ntp_day);
+            SerialMon.printf("  Hora (lida do modem): %02d:%02d:%02d\n", ntp_hour, ntp_min, ntp_sec);
+            SerialMon.printf("  FUSO HORÁRIO (Timezone) reportado: %f (quartos de hora)\n", ntp_timezone);
+            SerialMon.println(F("============================================="));
+
+            struct tm timeinfo = {0};
+            timeinfo.tm_year = ntp_year - 1900; 
+            timeinfo.tm_mon = ntp_month - 1;    
+            timeinfo.tm_mday = ntp_day;
+            timeinfo.tm_hour = ntp_hour;
+            timeinfo.tm_min = ntp_min;
+            timeinfo.tm_sec = ntp_sec;
+
+            time_t epoch_time_lida = mktime(&timeinfo);
+            
+            long timezone_seconds = (long)(ntp_timezone * 15.0f * 60.0f);
+            time_t epoch_time_utc = epoch_time_lida - timezone_seconds; 
+
+            struct timeval tv;
+            tv.tv_sec = epoch_time_utc; 
+            tv.tv_usec = 0;
+            settimeofday(&tv, NULL); 
+
+            SerialMon.println(F("CommManager: Relógio interno (RTC) do ESP32 sincronizado para UTC!"));
+            
+            return true; 
+
+        } else {
+            SerialMon.println(F("CommManager: Falha ao ler a hora... retentando em 5s."));
+            delay(5000L); 
+        }
+    }
+
+    SerialMon.println(F("CommManager: AVISO - Falha ao obter a hora do modem após 5 tentativas."));
+    return false;
+}
+
+
+/**
+ * @brief (Função Privada) Configura o cliente SSL e conecta ao AWS IoT via MQTT.
+ *
+ * Esta função carrega os certificados (CA, Certificado, Chave Privada)
+ * na instância do SSLClient e, em seguida, usa o PubSubClient para
+ * estabelecer a conexão MQTT segura (porta 8883) com o endpoint da AWS.
+ *
+ * Inclui uma lógica de 5 retentativas com 5s de espera em caso de falha.
+ *
+ * @return true se a conexão MQTT for estabelecida, false caso contrário.
+ */
+static bool connect_aws_iot() {
+
+    // Log de Heap: Para depurar falhas de alocação de memória SSL
+    SerialMon.printf("CommManager: Free Heap before SSL config: %u\n", ESP.getFreeHeap());
     SerialMon.println(F("CommManager: Configuring SSL/TLS for AWS IoT..."));
+
+    // 1. Configura os certificados para o cliente SSL
     ssl_client.setCACert(AWS_IOT_ROOT_CA);
     ssl_client.setCertificate(AWS_CERT_CRT);
     ssl_client.setPrivateKey(AWS_PRIVATE_KEY);
 
-    mqtt_client.setServer(AWS_IOT_ENDPOINT, 8883);
-    mqtt_client.setCallback(comm_manager_mqtt_callback);
-    mqtt_client.setBufferSize(512); 
+    // 2. Configura o cliente MQTT
+    mqtt_client.setServer(AWS_IOT_ENDPOINT, 8883); // Porta padrão AWS IoT
+    mqtt_client.setCallback(mqtt_callback); // Define o "ouvido"
+    mqtt_client.setBufferSize(512); // Aumenta o buffer 
 
-    SerialMon.print(F("CommManager: Attempting MQTT connection to AWS IoT..."));
+    SerialMon.print(F("CommManager: Tentando conexão MQTT com o AWS IoT..."));
     int retries = 0;
-    while (!mqtt_client.connected() && retries < 3) {
-        SerialMon.printf(" (Attempt %d/3)\n", retries + 1);
-        SerialMon.printf("CommManager: Free Heap before MQTT connect call: %u\n", ESP.getFreeHeap());
+
+    while (!mqtt_client.connected() && retries < 5) {
+        SerialMon.printf(" (Tentativa %d/3)\n", retries + 1);
+        SerialMon.printf("CommManager: Free Heap antes da chamada de conexão MQTT: %u\n", ESP.getFreeHeap());
+
         if (mqtt_client.connect(AWS_IOT_CLIENT_ID)) {
-            SerialMon.println(F("CommManager: MQTT connected to AWS IoT!"));
+            SerialMon.println(F("CommManager: MQTT conectado com o AWS IoT!"));
             return true;
         } else {
-            SerialMon.print(F("CommManager: MQTT connection failed, rc="));
+            SerialMon.print(F("CommManager: conexão MQTT falhou, rc="));
             SerialMon.print(mqtt_client.state()); 
-            SerialMon.println(F(". Trying again in 5 seconds..."));
+            SerialMon.println(F(". Tentando novamente em 5 segundos..."));
             
             delay(5000);
             retries++;
         }
     }
-    SerialMon.println(F("CommManager: Failed to connect to AWS IoT after retries."));
+
+    SerialMon.println(F("CommManager: Falhou ao conectar ao AWS IoT após 5 tentativas."));
     return false;
 }
 
-bool comm_manager_publish_data(const SCD40_Data& scd40_data, const MICS6814_Data& mics_data, const DSM501A_Data& dsm_data, const GPS_Data& gps_data) {
+
+/**
+ * @brief Publica os dados dos sensores para o AWS IoT Core.
+ * @param scd40_data Referência para a estrutura com os dados do SCD40.
+ * // Adicionar parâmetros para outros sensores conforme necessário
+ * @return true se a publicação for bem-sucedida, false caso contrário.
+ */
+bool publish_data(
+    const SCD40_Data& scd40_data, 
+    const MICS6814_Data& mics_data, 
+    const DSM501A_Data& dsm_data, 
+    const GPS_Data& gps_data) {
     if (!modem.isGprsConnected()) {
          SerialMon.println(F("CommManager: GPRS not connected. Cannot publish."));
          return false;
     }
     if (!mqtt_client.connected()) {
         SerialMon.println(F("CommManager: MQTT client not connected. Attempting to reconnect..."));
-        if (!comm_manager_connect_aws_iot()) { // Tenta reconectar ao MQTT
+        if (!connect_aws_iot()) { // Tenta reconectar ao MQTT
             SerialMon.println(F("CommManager: Failed to reconnect MQTT. Cannot publish."));
             return false;
         }
@@ -385,8 +413,12 @@ bool comm_manager_publish_data(const SCD40_Data& scd40_data, const MICS6814_Data
         JsonObject location_json = jsonDoc["location"].to<JsonObject>();
         location_json["latitude"] = serialized(String(gps_data.latitude, 6));
         location_json["longitude"] = serialized(String(gps_data.longitude, 6));
-        location_json["hdop"] = round(gps_data.hdop * 100.0) / 100.0; // Agora enviamos o HDOP
-        location_json["satellites"] = gps_data.satellites;
+        location_json["accuracy_m"] = round(gps_data.accuracy * 100.0) / 100.0; 
+
+        location_json["satellites_used"] = gps_data.satellites_used;
+        
+        location_json["satellites_visible"] = gps_data.satellites_visible;
+        location_json["altitude_m"] = round(gps_data.altitude * 100.0) / 100.0;
     }
 
     char jsonBuffer[1024];
@@ -413,23 +445,100 @@ bool comm_manager_publish_data(const SCD40_Data& scd40_data, const MICS6814_Data
     }
 }
 
-void comm_manager_disconnect_and_powerdown_modem() {
+
+/**
+ * @brief (Função Privada) Desconecta e desliga todas as camadas da rede 
+ * de forma "graciosa" (graceful shutdown).
+ *
+ * Desliga a pilha na ordem correta (de cima para baixo):
+ * 1. MQTT (PubSubClient)
+ * 2. SSL (SSLClientESP32)
+ * 3. TCP (TinyGsmClient)
+ * 4. GPRS (TinyGSM)
+ * 5. Hardware (Pulso de energia)
+ */
+static void disconnect_and_powerdown_modem() {
+    SerialMon.println(F("CommManager: Iniciando sequência de desligamento..."));
+
     if (mqtt_client.connected()) {
         mqtt_client.disconnect();
-        SerialMon.println(F("CommManager: MQTT disconnected."));
+        SerialMon.println(F("CommManager: MQTT desconectado."));
     }
+
     if (ssl_client.connected()) { 
         ssl_client.stop();
-        SerialMon.println(F("CommManager: SSL client stopped."));
+        SerialMon.println(F("CommManager: Cliente SSL parado."));
     }
+
     if (base_client.connected()) {
         base_client.stop();
-        SerialMon.println(F("CommManager: Base (TCP) client stopped."));
+        SerialMon.println(F("CommManager: Cliente Base (TCP) parado."));
     }
+
     if (modem.isGprsConnected()) {
         modem.gprsDisconnect(); 
-        SerialMon.println(F("CommManager: GPRS detached."));
+        SerialMon.println(F("CommManager: GPRS desconectado."));
     }
+
     modemPowerOff(); 
-    SerialMon.println(F("CommManager: Modem powered down or in sleep mode."));
+    SerialMon.println(F("CommManager: Modem desligado fisicamente."));
+}
+
+bool perform_communication_cycle(
+    const SCD40_Data& scd_data,
+    const MICS6814_Data& mics_data,
+    const DSM501A_Data& dsm_data,
+    GPS_Data& out_gps_data
+) {
+    bool publication_successful = false;
+
+    //===========
+    int ntp_year = 0, ntp_month = 0, ntp_day = 0;
+    int ntp_hour = 0, ntp_min = 0, ntp_sec = 0;
+    float ntp_timezone = 0.0f;
+    bool time_synced = false;
+    String time_str;
+
+    SerialMon.println(F("\n=== INICIANDO CICLO DE COMUNICAÇÃO ==="));
+
+    if (!setup_modem_and_network()) {
+        SerialMon.println(F("Comm. Cycle: FALHA CRÍTICA - Não foi possível ligar ou registrar o modem."));
+        goto cleanup; 
+    }
+
+    if (!connect_gprs()) {
+        SerialMon.println(F("Comm. Cycle: FALHA CRÍTICA - Não foi possível conectar ao GPRS (APN)."));
+        goto cleanup;
+    }
+
+    if (!synchronize_time_with_ntp()) {
+        SerialMon.println(F("Comm. Cycle: AVISO - Falha ao sincronizar o relógio."));
+    } else {
+        SerialMon.println(F("Comm. Cycle: Sincronização de relógio bem-sucedida."));
+    }
+    
+    SerialMon.println(F("Comm. Cycle: Tentando obter localização GPS..."));
+    get_gps_location(out_gps_data, 150);
+
+    if (!connect_aws_iot()) {
+        SerialMon.println(F("Comm. Cycle: FALHA CRÍTICA - Não foi possível conectar ao AWS IoT (MQTT)."));
+        goto cleanup;
+    }
+
+    SerialMon.println(F("Comm. Cycle: Publicando dados dos sensores..."));
+    if (publish_data(scd_data, mics_data, dsm_data, out_gps_data)) {
+        SerialMon.println(F("Comm. Cycle: Publicação de dados BEM-SUCEDIDA."));
+        publication_successful = true; 
+    } else {
+        SerialMon.println(F("Comm. Cycle: FALHA - Não foi possível publicar os dados."));
+    }
+
+cleanup:
+SerialMon.println(F("Comm. Cycle: Executando limpeza e desligamento do modem..."));
+
+disconnect_and_powerdown_modem();
+
+SerialMon.println(F("=== CICLO DE COMUNICAÇÃO FINALIZADO ==="));
+
+return publication_successful;
 }
