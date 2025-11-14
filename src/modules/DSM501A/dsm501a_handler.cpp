@@ -1,75 +1,139 @@
 #include "dsm501a_handler.h"
 
-// Variáveis para o cálculo da LOP
-static unsigned long low_pulse_start_time_pm25 = 0;
-static unsigned long total_low_pulse_duration_pm25 = 0;
-static bool in_low_pulse_pm25 = false;
+// ===================================================================
+// --- Variáveis Globais para as Interrupções (ISR) ---
+// Precisamos de 'volatile' para dizer ao compilador que estas
+// variáveis podem mudar a qualquer momento (pela interrupção).
+// ===================================================================
 
-// Descomente se for usar PM10
-// static unsigned long low_pulse_start_time_pm10 = 0;
-// static unsigned long total_low_pulse_duration_pm10 = 0;
-// static bool in_low_pulse_pm10 = false;
+// Variáveis para o pino PM2.5
+static volatile unsigned long g_dsm_pm25_low_start_time_us = 0;
+static volatile unsigned long g_dsm_pm25_total_low_time_us = 0;
 
-void dsm501a_init() {
-    pinMode(DSM501A_PM25_PIN, INPUT);
-    Serial.printf("DSM501A: Pino PM2.5 (GPIO %d) configurado como ENTRADA.\n", DSM501A_PM25_PIN);
+// Variáveis para o pino PM10
+static volatile unsigned long g_dsm_pm10_low_start_time_us = 0;
+static volatile unsigned long g_dsm_pm10_total_low_time_us = 0;
 
-    pinMode(DSM501A_PM10_PIN, INPUT);
-    Serial.printf("DSM501A: Pino PM10 (GPIO %d) configurado como ENTRADA.\n", DSM501A_PM10_PIN);
-    
-    Serial.println("DSM501A: Handler inicializado. ");
+
+// ===================================================================
+// --- Funções ISR (Interrupt Service Routines) ---
+// Estas são as funções "mágicas" chamadas pelo hardware.
+// Elas devem ser o mais RÁPIDAS possível. Não use Serial.print aqui.
+// ===================================================================
+
+/**
+ * @brief ISR para o pino PM2.5. Chamada em CADA mudança de borda (HIGH/LOW).
+ */
+void IRAM_ATTR dsm_pm25_isr() {
+    // 1. Lê o estado ATUAL do pino
+    bool pin_state_is_low = (digitalRead(DSM501A_PM25_PIN) == LOW);
+
+    if (pin_state_is_low) {
+        // Borda de SUBIDA para BAIXO (HIGH -> LOW)
+        // O pulso LOW acabou de começar. Salve a hora atual.
+        g_dsm_pm25_low_start_time_us = micros();
+    } else {
+        // Borda de SUBIDA (LOW -> HIGH)
+        // O pulso LOW acabou de terminar.
+        // Se já tínhamos um tempo de início, calcule a duração e some ao total.
+        if (g_dsm_pm25_low_start_time_us > 0) {
+            g_dsm_pm25_total_low_time_us += (micros() - g_dsm_pm25_low_start_time_us);
+            g_dsm_pm25_low_start_time_us = 0; // Reseta para a próxima
+        }
+    }
 }
 
 /**
- * @brief Mede a duração total dos pulsos baixos em um pino específico durante o tempo de amostragem.
- * Esta função é bloqueante durante o sample_time_ms.
- * @param pin O pino GPIO a ser lido.
- * @param sample_time_ms O tempo total de amostragem em milissegundos.
- * @return A duração total em microssegundos em que o pino esteve em nível BAIXO.
+ * @brief ISR para o pino PM10.
  */
-static unsigned long measure_total_low_pulse_duration(uint8_t pin, unsigned long sample_time_ms) {
-    unsigned long total_low_time_us = 0;
-    unsigned long sample_start_time_ms = millis();
-    unsigned long pulse_timeout_us = 2000000; 
-
-    Serial.printf("DSM501A: Iniciando amostragem no pino %d por %lu ms...\n", pin, sample_time_ms);
-
-    while (millis() - sample_start_time_ms < sample_time_ms) {
-        // Mede a duração do próximo pulso BAIXO.
-        unsigned long pulse_duration_us = pulseIn(pin, LOW, pulse_timeout_us);
-        
-        if (pulse_duration_us > 0) {
-            total_low_time_us += pulse_duration_us;
+void IRAM_ATTR dsm_pm10_isr() {
+    bool pin_state_is_low = (digitalRead(DSM501A_PM10_PIN) == LOW);
+    if (pin_state_is_low) {
+        g_dsm_pm10_low_start_time_us = micros();
+    } else {
+        if (g_dsm_pm10_low_start_time_us > 0) {
+            g_dsm_pm10_total_low_time_us += (micros() - g_dsm_pm10_low_start_time_us);
+            g_dsm_pm10_low_start_time_us = 0;
         }
     }
-    Serial.printf("DSM501A: Amostragem no pino %d concluída. Tempo total em BAIXO: %lu us.\n", pin, total_low_time_us);
-    return total_low_time_us;
 }
 
-bool dsm501a_read_data(DSM501A_Data &data, unsigned long sample_time_ms) {
-    data.isValid = false; // Assume inválido inicialmente
 
-    // --- Leitura para PM2.5 ---
-    unsigned long total_low_duration_us_pm25 = measure_total_low_pulse_duration(DSM501A_PM25_PIN, sample_time_ms);
+// ===================================================================
+// --- Funções Públicas ---
+// ===================================================================
+
+/**
+ * @brief Inicializa os pinos GPIO para leitura do(s) sensor(es) DSM501A.
+ */
+void dsm501a_init() {
+    // Configura os pinos como INPUT (com pull-up interno desabilitado,
+    // já que temos nosso divisor de tensão externo que age como pull-up)
+    pinMode(DSM501A_PM25_PIN, INPUT);
+    pinMode(DSM501A_PM10_PIN, INPUT);
     
-    // Calcula a LOP (Low Pulse Occupancy) ratio em porcentagem
-    // LOP = (tempo_total_em_baixo_us / tempo_total_amostragem_us) * 100
-    if (sample_time_ms > 0) {
-        data.low_pulse_occupancy_ratio_pm25 = ((float)total_low_duration_us_pm25 / (float)(sample_time_ms * 1000.0f)) * 100.0f;
-    } else {
-        data.low_pulse_occupancy_ratio_pm25 = 0.0f; // Evita divisão por zero
+    Serial.printf("DSM501A: Pino PM2.5 (GPIO %d) configurado como ENTRADA.\n", DSM501A_PM25_PIN);
+    Serial.printf("DSM501A: Pino PM10 (GPIO %d) configurado como ENTRADA.\n", DSM501A_PM10_PIN);
+    Serial.println("DSM501A: Handler (Interrupt-based) inicializado.");
+    Serial.println("DSM501A: AVISO - Sensor requer 1 minuto de aquecimento (warm-up) após ligar.");
+}
+
+/**
+ * @brief Realiza a leitura dos dados do sensor DSM501A usando interrupções.
+ */
+bool dsm501a_read_data(DSM501A_Data &data, unsigned long sample_time_ms) {
+    data.isValid = false; 
+
+    // O datasheet do DSM501A recomenda 30 segundos de amostragem.
+    if (sample_time_ms < 10000) { // Mínimo de 10s
+        Serial.printf("DSM501A: AVISO - Tempo de amostragem (%lu ms) é muito baixo. Recomendado: 30000 ms.\n", sample_time_ms);
     }
+    if (sample_time_ms == 0) return false;
+
+    Serial.printf("DSM501A: Iniciando amostragem por %lu ms (usando interrupções)...\n", sample_time_ms);
+
+    // 1. Zera os contadores globais
+    g_dsm_pm25_total_low_time_us = 0;
+    g_dsm_pm25_low_start_time_us = 0;
+    g_dsm_pm10_total_low_time_us = 0;
+    g_dsm_pm10_low_start_time_us = 0;
+
+    // 2. Anexa as interrupções (liga os "ouvidos")
+    //    digitalPinToInterrupt() é a forma correta de mapear GPIO 19 -> ID da Interrupção
+    //    CHANGE = Dispara a ISR em CADA mudança (subida ou descida)
+    attachInterrupt(digitalPinToInterrupt(DSM501A_PM25_PIN), dsm_pm25_isr, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(DSM501A_PM10_PIN), dsm_pm10_isr, CHANGE);
+
+    // 3. Dorme (bloqueia) pelo tempo de amostragem
+    //    Enquanto o 'delay' roda, as ISRs 'dsm_pm25_isr' e 'dsm_pm10_isr'
+    //    estão rodando em segundo plano, contando os pulsos.
+    delay(sample_time_ms);
+
+    // 4. Desanexa as interrupções (desliga os "ouvidos")
+    detachInterrupt(digitalPinToInterrupt(DSM501A_PM25_PIN));
+    detachInterrupt(digitalPinToInterrupt(DSM501A_PM10_PIN));
+
+    Serial.println("DSM501A: Amostragem concluída. Calculando LOP Ratio...");
+
+    // 5. Calcula os resultados
+    float sample_time_us = (float)(sample_time_ms * 1000.0f);
+
+    // PM2.5
+    data.low_pulse_occupancy_ratio_pm25 = ((float)g_dsm_pm25_total_low_time_us / sample_time_us) * 100.0f;
+    Serial.printf("DSM501A: PM2.5 Tempo total em BAIXO: %lu us\n", (unsigned long)g_dsm_pm25_total_low_time_us);
     Serial.printf("DSM501A: PM2.5 LOP Ratio: %.2f %%\n", data.low_pulse_occupancy_ratio_pm25);
 
-    // --- Leitura para PM10 (Descomente e adapte se estiver usando) ---
-    unsigned long total_low_duration_us_pm10 = measure_total_low_pulse_duration(DSM501A_PM10_PIN, sample_time_ms);
-    if (sample_time_ms > 0) {
-        data.low_pulse_occupancy_ratio_pm10 = ((float)total_low_duration_us_pm10 / (float)(sample_time_ms * 1000.0f)) * 100.0f;
-    } else {
-        data.low_pulse_occupancy_ratio_pm10 = 0.0f;
-    }
+    // PM10
+    data.low_pulse_occupancy_ratio_pm10 = ((float)g_dsm_pm10_total_low_time_us / sample_time_us) * 100.0f;
+    Serial.printf("DSM501A: PM10 Tempo total em BAIXO: %lu us\n", (unsigned long)g_dsm_pm10_total_low_time_us);
     Serial.printf("DSM501A: PM10 LOP Ratio: %.2f %%\n", data.low_pulse_occupancy_ratio_pm10);
 
-    data.isValid = true; // Marca como válido após as leituras
-    return true;
+    // Se qualquer leitura for > 0, consideramos o sensor válido
+    if (g_dsm_pm25_total_low_time_us > 0 || g_dsm_pm10_total_low_time_us > 0) {
+        data.isValid = true; 
+    } else {
+        Serial.println("DSM501A: AVISO - Leituras de pulso ainda são 0 us. Verifique o warm-up e a fiação.");
+    }
+
+    return true; 
 }

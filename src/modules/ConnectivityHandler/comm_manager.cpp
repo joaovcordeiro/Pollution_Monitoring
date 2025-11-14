@@ -396,12 +396,12 @@ static bool publish_data(
     if (mics_data.isValid) {
         JsonObject mics_json = jsonDoc["mics6814"].to<JsonObject>();
         // Enviar tanto a tensão (para depuração) quanto o PPM (para análise)
-        mics_json["voltage_co"] = mics_data.voltage_co;
-        mics_json["ppm_co"] = mics_data.ppm_co;
-        mics_json["voltage_no2"] = mics_data.voltage_no2;
-        mics_json["ppm_no2"] = mics_data.ppm_no2;
-        mics_json["voltage_nh3"] = mics_data.voltage_nh3;
-        mics_json["ppm_nh3"] = mics_data.ppm_nh3;
+        mics_json["ppm_co"] = String(mics_data.ppm_co, 2);
+        mics_json["ppm_no2"] = String(mics_data.ppm_no2, 2);
+        mics_json["ppm_nh3"] = String(mics_data.ppm_nh3, 2);
+        mics_json["raw_co"] = mics_data.raw_co;
+        mics_json["raw_no2"] = mics_data.raw_no2;
+        mics_json["raw_nh3"] = mics_data.raw_nh3;
 }
 
     if (dsm_data.isValid) {

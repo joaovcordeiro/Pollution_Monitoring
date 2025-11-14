@@ -1,95 +1,75 @@
 #include "ads1115_handler.h"
 #include <Wire.h>     
-#include <limits.h>   
+#include <Adafruit_ADS1X15.h>
 
 Adafruit_ADS1115 ads; 
-// static adsGain_t current_ads_gain_setting = GAIN_TWOTHIRDS; // Para rastrear o que está configurado no hardware
 
+
+// O seu módulo MICS é alimentado por 5V. As saídas analógicas
+// dele também podem chegar a 5V.
+// O ADS1115 também está em 5V. Portanto, precisamos de um ganho (PGA)
+// que possa ler com segurança até 5V (ou mais).
+// GAIN_TWOTHIRDS cobre +/- 6.144V. É a escolha correta.
+const adsGain_t ADC_GAIN = GAIN_TWOTHIRDS;
+
+// Esta é a "constante mágica" para converter o valor RAW em Volts.
+// É o V_max (6.144V) dividido pelo valor RAW máximo (32767).
+// (6.144 / 32767.0 = 0.0001875)
+const float VOLTAGE_MULTIPLIER_16BIT_6V = 0.0001875f;
+
+/**
+ * @brief Inicializa o sensor ADS1115. (Função pública do .h)
+ */
 bool ads1115_init(uint8_t i2c_address) {
-    Serial.printf("ADS1115: Attempting to initialize at I2C address 0x%02X...\n", i2c_address);
+    Serial.printf("ADS1115: Tentando inicializar no endereço I2C 0x%X...\n", i2c_address);
     
-    // Configura um ganho padrão inicial. Este é o ganho que o hardware usará para as leituras.
-    ads.setGain(GAIN_TWOTHIRDS); 
-    // current_ads_gain_setting = GAIN_TWOTHIRDS;
-
-    if (!ads.begin(i2c_address)) {
-        Serial.printf("ADS1115: Failed to initialize. Check wiring and I2C address 0x%02X.\n", i2c_address);
+    // Passamos o ponteiro &Wire para a biblioteca
+    if (!ads.begin(i2c_address, &Wire)) {
+        Serial.println("ADS1115: FALHA CRÍTICA - Não foi possível encontrar o ADC.");
         return false;
     }
+
+    // Define o ganho que escolhemos
+    ads.setGain(ADC_GAIN);
     
-    Serial.printf("ADS1115: Initialization successful at address 0x%02X.\n", i2c_address);
-    Serial.print("ADS1115: Initial Hardware Gain Set To: ");
-    switch (ads.getGain()) { 
-        case GAIN_TWOTHIRDS: Serial.println("2/3 (FS +/-6.144V)"); break;
-        case GAIN_ONE:       Serial.println("1   (FS +/-4.096V)"); break;
-        // ... (outros casos de ganho)
-        default:             Serial.println("Unknown"); break;
-    }
+    // Opcional: Aumentar a taxa de dados. 860 amostras por segundo
+    // torna nossa leitura de 32 amostras (próxima função) mais rápida.
+    ads.setDataRate(RATE_ADS1115_860SPS);
+
+    Serial.printf("ADS1115: Inicialização bem-sucedida no endereço 0x%X.\n", i2c_address);
+    Serial.printf("ADS1115: Ganho de hardware definido para: 2/3 (FS +/-6.144V)\n");
     return true;
 }
 
-void ads1115_set_gain(adsGain_t new_gain) {
-    // Esta função configura o GANHO NO HARDWARE (objeto ads)
-    Serial.print("ADS1115: Setting hardware gain to: ");
-    switch (new_gain) {
-        case GAIN_TWOTHIRDS: Serial.println("2/3"); break;
-        case GAIN_ONE:       Serial.println("1"); break;
-        // ... (outros casos)
-        default:             Serial.println("Unknown Gain Value"); break;
-    }
-    ads.setGain(new_gain);
-    // current_ads_gain_setting = new_gain;
-}
+/**
+ * @brief Lê um canal analógico de forma robusta. (Função pública do .h)
+ */
+int16_t ads1115_read_stable_raw_value(ads_channel_t channel) {
+    
+    // Esta é a lógica de "oversampling" que encontramos no driver profissional.
+    // Ela filtra ruídos elétricos (ex: do aquecedor do MICS).
+    const int NUM_SAMPLES = 32;
+    
+    // Usamos int32_t para o acumulador para evitar "estouro" (overflow)
+    int32_t adc_sum = 0; 
 
-int16_t ads1115_read_adc_single_ended(uint8_t channel) {
-    // Esta função lê o ADC usando o ganho que está ATUALMENTE CONFIGURADO no objeto 'ads'
-    if (channel > 3) {
-        Serial.printf("ADS1115: Error - Invalid channel %d requested.\n", channel);
-        return INT16_MIN; 
+    // 1. Lê o ADC 32 vezes o mais rápido possível
+    for (int i = 0; i < NUM_SAMPLES; i++) {
+        // A biblioteca da Adafruit mapeia 0, 1, 2, 3 para os canais
+        adc_sum += (int32_t)ads.readADC_SingleEnded(channel);
     }
-    return ads.readADC_SingleEnded(channel);
+
+    // 2. Retorna a média.
+    //    (adc_sum >> 5) é uma forma muito rápida (bit-shift) 
+    //    de fazer (adc_sum / 32).
+    return (int16_t)(adc_sum >> 5);
 }
 
 /**
- * @brief Converte a leitura bruta do ADC para tensão (em Volts).
- * Esta função calcula a tensão baseada no valor ADC e no ganho ESPECIFICADO
- * que FOI USADO durante a aquisição daquele valor ADC.
- * Ela NÃO depende do ganho atualmente configurado no objeto 'ads' para o cálculo.
+ * @brief Converte um valor RAW para Volts. (Função pública do .h)
  */
-float ads1115_compute_voltage(int16_t adc_value, adsGain_t gain_used_for_reading) {
-    float fs_voltage; // Tensão de fundo de escala (Full-Scale) para o ganho especificado
-
-    switch (gain_used_for_reading) {
-        case GAIN_TWOTHIRDS: // +/- 6.144V
-            fs_voltage = 6.144f;
-            break;
-        case GAIN_ONE:       // +/- 4.096V
-            fs_voltage = 4.096f;
-            break;
-        case GAIN_TWO:       // +/- 2.048V
-            fs_voltage = 2.048f;
-            break;
-        case GAIN_FOUR:      // +/- 1.024V
-            fs_voltage = 1.024f;
-            break;
-        case GAIN_EIGHT:     // +/- 0.512V
-            fs_voltage = 0.512f;
-            break;
-        case GAIN_SIXTEEN:   // +/- 0.256V
-            fs_voltage = 0.256f;
-            break;
-        default:
-            Serial.println("ADS1115: Error - Unknown gain for voltage computation.");
-            return 0.0f; // Ou NAN
-    }
-
-    // O ADS1115 é um ADC de 16 bits. Para leituras single-ended, os valores positivos
-    // vão de 0 a 32767, correspondendo de 0V à tensão de fundo de escala positiva (fs_voltage).
-    // Voltagem = (valor_adc_bruto / 32767.0) * fs_voltage_positiva
-    // No caso da biblioteca Adafruit, eles usam fs_voltage como a faixa total (+/-),
-    // então a conversão é counts * (fs_voltage_para_o_pga / 32767.0)
-    // Para single-ended, a faixa efetiva é de 0 a +fs_voltage (se a entrada for positiva).
-    // A função ads.computeVolts() faz isso, mas ela usa o m_gain interno.
-    // Reimplementando a lógica:
-    return (float)adc_value * (fs_voltage / 32767.0f);
+float ads1115_convert_to_voltage(int16_t raw_adc_value) {
+    // Apenas para fins de log e publicação, se necessário.
+    // O módulo MICS6814 usará o valor RAW.
+    return (float)raw_adc_value * VOLTAGE_MULTIPLIER_16BIT_6V;
 }

@@ -3,8 +3,12 @@
 #include "modules/SCD40/scd40_handler.h"
 #include "modules/ADS1115/ads1115_handler.h"
 #include "modules/MICS6814/mics6814_handler.h" 
-#include "modules/DSM501A/dsm501a_handler.h"
 #include "modules/ConnectivityHandler/comm_manager.h"
+
+// Insira os valores de R0 que você obteve do script "MICS_Calibrar.ino"
+const int16_t CALIBRATED_R0_CO  = 12345; // <-- SUBSTITUA ESTE VALOR
+const int16_t CALIBRATED_R0_NO2 = 6789;  // <-- SUBSTITUA ESTE VALOR
+const int16_t CALIBRATED_R0_NH3 = 10111; // <-- SUBSTITUA ESTE VALOR
 
 // Variáveis Globais para Dados dos Sensores
 SCD40_Data scd40SensorData;
@@ -21,14 +25,19 @@ void setup() {
     init_serial(); // Inicializa SerialAT para o modem
     setup_sensor_power(); // Configura o pino do MOSFET para controle de energia dos sensores
     Wire.begin(); 
-    dsm501a_init();
 
-    
     // // ETAPA 1: Ligar, Ler e Desligar Sensores
     Serial.println(F("Main: Powering ON sensors..."));
     // // O SENSOR_STABILIZATION_DELAY_MS no config.h deve ser longo o suficiente
-    // // para o pré-aquecimento do MICS6814 e DSM501A 
+    // // para o pré-aquecimento do MICS6814 e SPS30 
     power_sensors_on(); 
+
+    if (!ads1115_init(0x48)) { // 0x48 é o endereço (ADDR no GND)
+        Serial.println(F("Main: FALHA CRÍTICA - ADS1115 não encontrado."));
+    }
+
+    //inicializa o handler do MICS com os valores de calibração
+    mics6814_init(CALIBRATED_R0_CO, CALIBRATED_R0_NO2, CALIBRATED_R0_NH3);
 
     // // Leitura do SCD40
     if (scd40_init()) {
@@ -45,36 +54,15 @@ void setup() {
         Serial.println(F("Main: Failed SCD40 init."));
     }
 
-    // // Leitura do MICS6814 via ADS1115
-    if (ads1115_init(0x48)) { 
-        if (mics6814_init()) { 
-            if (mics6814_read_voltages(mics6814SensorData) && mics6814SensorData.isValid) {
-                Serial.println(F("Main: MICS6814 voltages read. Calculating PPM..."));
-                mics6814_calculate_ppm(mics6814SensorData);
-            } else { 
-                mics6814SensorData.isValid = false; 
-                Serial.println(F("Main: Failed MICS6814 read."));
-            }
-        } else { 
-            mics6814SensorData.isValid = false; 
-            Serial.println(F("Main: Failed MICS6814 init."));
-        }
-    } else { 
-        Serial.println(F("Main: ADS1115 initialization FAILED. Skipping MICS6814."));
-        mics6814SensorData.isValid = false;
+    // Leitura do MICS6814 via ADS1115
+    Serial.println(F("Main: Lendo MICS6814..."));
+    // As funções antigas (read_voltages, calculate_ppm) foram substituídas
+    // por esta única chamada:
+    if (!mics6814_read_data(mics6814SensorData)) {
+        Serial.println(F("Main: Falha ao ler dados do MICS6814."));
     }
+    Serial.printf("Main: MICS (isValid: %d) -> CO: %.2f ppm\n", mics6814SensorData.isValid, mics6814SensorData.ppm_co);
 
-    // // Leitura do DSM501A
-  
-    Serial.println(F("Main: Starting DSM501A reading (this will take time)..."));
-    if (dsm501a_read_data(dsm501aSensorData)) { 
-        Serial.println(F("Main: DSM501A data (LOP ratio) calculated."));
-        Serial.printf("DSM501A Data: PM2.5 LOP Ratio: %.2f %%\n", dsm501aSensorData.low_pulse_occupancy_ratio_pm25);
-        Serial.printf("DSM501A Data: PM10 LOP Ratio: %.2f %%\n", dsm501aSensorData.low_pulse_occupancy_ratio_pm10);
-    } else {
-        Serial.println(F("Main: Failed to read DSM501A data."));
-        dsm501aSensorData.isValid = false;
-    }
     
     Serial.println(F("Main: Powering OFF sensors..."));
     delay(5000);
