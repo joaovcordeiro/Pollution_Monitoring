@@ -2,7 +2,17 @@
 #define POWER_MANAGER_H
 
 #include <Arduino.h>     
-#include "esp_sleep.h"   
+
+// --- Configurações da Bateria ---
+#define BATTERY_CAPACITY_MAH 2200.0 
+#define SYSTEM_AVG_CONSUMPTION_MA 15.0
+
+struct Battery_Data {
+    float voltage;          // Tensão (Volts)
+    float percentage;       // Carga Estimada (%)
+    float days_remaining;   // Previsão de duração (Dias)
+    bool is_usb_connected;  // Indica se está ligado no USB
+};
 
 /**
  * @brief Configura o pino de controle de energia dos sensores.
@@ -21,6 +31,8 @@ void power_sensors_on();
  * @brief Desliga a alimentação dos sensores através do MOSFET.
  */
 void power_sensors_off();
+
+void get_battery_status(Battery_Data &data);
 
 /**
  * @brief Configura o ESP32 para entrar em Deep Sleep por um período definido.

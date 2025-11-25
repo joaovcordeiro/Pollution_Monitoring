@@ -5,7 +5,8 @@
 #include "config.h" // Para credenciais e constantes de rede/AWS
 #include "modules/SCD40/scd40_handler.h" // Para o tipo SCD40_Data
 #include "modules/MICS6814/mics6814_handler.h"
-#include "modules/DSM501A/dsm501a_handler.h"
+#include "modules/SPS30/sps30_handler.h"
+#include "modules/PowerManager/power_manager.h"
 
 struct GPS_Data {
     float latitude = 0.0f;
@@ -48,7 +49,8 @@ void init_serial();
 bool perform_communication_cycle(
     const SCD40_Data& scd_data,
     const MICS6814_Data& mics_data,
-    const DSM501A_Data& dsm_data,
+    const SPS30_Data& sps30_data,
+    const Battery_Data& bat_data,
     GPS_Data& out_gps_data // Passado por referência para ser preenchido
 );
 

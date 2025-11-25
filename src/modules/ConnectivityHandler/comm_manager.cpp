@@ -78,31 +78,82 @@ void init_serial() {
 static bool setup_modem_and_network() {
     SerialMon.println(F("--- Iniciando Sequência de Modem ---"));
 
-    modemPowerOn();
+    bool modem_is_alive = false;
 
-    SerialMon.println(F("CommManager: Reiniciando modem (TinyGSM) e aguardando boot..."));
+    modem.sendAT(""); 
+    modem.sendAT("AT");
+    if (modem.waitResponse(500) == 1) modem_is_alive = true;
 
-    if (!modem.restart()) {
-        SerialMon.println(F("CommManager: Falha ao reiniciar modem (não respondeu aos comandos AT)!"));
+    if (!modem_is_alive) {
+        modemPowerOn(); 
         
-        modemPowerOff(); 
-        return false;
+        SerialMon.println(F("CommManager: Aguardando boot inicial do modem (6s)..."));
+        delay(6000); 
+    }
+
+    SerialMon.println(F("CommManager: Reiniciando modem..."));
+    if (!modem.restart()) {
+        SerialMon.println(F("CommManager: Tentando Hard Reset..."));
+        modemPowerOff(); delay(2000); modemPowerOn(); delay(6000);
+        if (!modem.restart()) {
+            modemPowerOff(); return false;
+        }
+    }
+
+    modem.sendAT(F("+CTZU=0")); modem.waitResponse();
+    modem.sendAT(F("+CTZR=0")); modem.waitResponse();
+
+    if (modem.setNetworkMode(38)) {
+        SerialMon.println(F("CommManager: Modo de Rede definido para LTE Only (38)."));
+    } else {
+        SerialMon.println(F("CommManager: Falha ao definir modo LTE."));
+    }
+
+    // 4. FORÇAR CAT-M1 (Preferred Mode 1)
+    if (modem.setPreferredMode(1)) {
+         SerialMon.println(F("CommManager: Preferência definida para CAT-M1."));
     }
 
     String modemInfo = modem.getModemInfo();
     SerialMon.print(F("CommManager: Informação do Modem: "));
     SerialMon.println(modemInfo);
 
-    SerialMon.println(F("CommManager: Aguardando registro na rede (max 3 min)..."));
-    if (!modem.waitForNetwork(180000L)) { 
-        SerialMon.println(F("CommManager: Falha ao registrar na rede celular."));
+    SerialMon.println(F("CommManager: Aguardando registro na rede... (Monitorando CSQ)"));
+    // Tenta por até 180 segundos (3 minutos)
+    unsigned long start = millis();
+    bool connected = false;
+    
+    while (millis() - start < 180000L) {
+        // Verifica se já registrou
+        if (modem.isNetworkConnected()) {
+            connected = true;
+            break;
+        }
+
+        // Diagnóstico: Mostra o nível de sinal a cada 2 segundos
+        // CSQ: 0-9 (Péssimo), 10-14 (Ok), 15-19 (Bom), 20+ (Excelente), 99 (Sem sinal)
+        int csq = modem.getSignalQuality();
+        SerialMon.print(F("Sinal CSQ: "));
+        SerialMon.print(csq);
+        
+        // Interpretação rápida para você
+        if (csq == 99) SerialMon.print(F(" (Sem Sinal/Buscando...)"));
+        else if (csq < 10) SerialMon.print(F(" (Fraco)"));
+        else SerialMon.print(F(" (Bom)"));
+        
+        SerialMon.println();
+        
+        delay(2000); // Espera 2s entre checagens
+    }
+    // =================================================================
+
+    if (!connected) { 
+        SerialMon.println(F("CommManager: TIMEOUT - Falha ao registrar na rede celular."));
         modemPowerOff();
         return false;
     }
-    SerialMon.println(F("CommManager: Rede celular registrada."));
-    SerialMon.print(F("CommManager: Qualidade do Sinal (CSQ 0-31): "));
-    SerialMon.println(modem.getSignalQuality());
-
+    
+    SerialMon.println(F("CommManager: Rede celular registrada!"));
     return true;
 }
 
@@ -199,15 +250,34 @@ static bool connect_gprs() {
     SerialMon.print(APN);
     SerialMon.println(F(")..."));
 
-    if (!modem.gprsConnect(APN, GPRS_USER, GPRS_PASS)) {
-        SerialMon.println(F("CommManager: Falha na conexão GPRS."));
-        return false;
+    const int MAX_RETRIES = 3;
+    const int RETRY_DELAY_MS = 3000;
+
+    for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        
+        if (attempt > 1) {
+            SerialMon.printf("CommManager: Tentativa GPRS %d/%d...\n", attempt, MAX_RETRIES);
+        }
+
+        if (modem.gprsConnect(APN, GPRS_USER, GPRS_PASS)) {
+            // SUCESSO!
+            SerialMon.println(F("CommManager: GPRS conectado com sucesso."));
+            SerialMon.print(F("CommManager: Endereço IP Local: "));
+            SerialMon.println(modem.getLocalIP());
+            return true;
+        } else {
+            // FALHA NA TENTATIVA ATUAL
+            SerialMon.print(F("CommManager: Falha na conexão GPRS. "));
+            if (attempt < MAX_RETRIES) {
+                SerialMon.println(F("Aguardando para tentar novamente..."));
+                delay(RETRY_DELAY_MS);
+            } else {
+                SerialMon.println(F("Desistindo."));
+            }
+        }
     }
 
-    SerialMon.println(F("CommManager: GPRS conectado com sucesso."));
-    SerialMon.print(F("CommManager: Endereço IP Local: "));
-    SerialMon.println(modem.getLocalIP());
-    return true;
+    return false;
 }
 
 /**
@@ -357,7 +427,8 @@ static bool connect_aws_iot() {
 static bool publish_data(
     const SCD40_Data& scd40_data, 
     const MICS6814_Data& mics_data, 
-    const DSM501A_Data& dsm_data, 
+    const SPS30_Data& sps30_data, 
+    const Battery_Data& bat_data,
     const GPS_Data& gps_data) {
 
     if (!modem.isGprsConnected()) {
@@ -385,7 +456,6 @@ static bool publish_data(
     jsonDoc["datetime_utc_str"] = time_str;
 
 
-
      if (scd40_data.isValid) {
         JsonObject scd_json = jsonDoc["scd40"].to<JsonObject>();
         scd_json["co2"] = round(scd40_data.co2 * 100.0) / 100.0; 
@@ -399,28 +469,40 @@ static bool publish_data(
         mics_json["ppm_co"] = String(mics_data.ppm_co, 2);
         mics_json["ppm_no2"] = String(mics_data.ppm_no2, 2);
         mics_json["ppm_nh3"] = String(mics_data.ppm_nh3, 2);
-        mics_json["raw_co"] = mics_data.raw_co;
-        mics_json["raw_no2"] = mics_data.raw_no2;
-        mics_json["raw_nh3"] = mics_data.raw_nh3;
+        // mics_json["raw_co"] = mics_data.raw_co;
+        // mics_json["raw_no2"] = mics_data.raw_no2;
+        // mics_json["raw_nh3"] = mics_data.raw_nh3;
 }
 
-    if (dsm_data.isValid) {
-        JsonObject dsm_json = jsonDoc["dsm501a"].to<JsonObject>();
-        dsm_json["lop_ratio_pm25"] = round(dsm_data.low_pulse_occupancy_ratio_pm25 * 100.0) / 100.0; 
-        dsm_json["lop_ratio_pm10"] = round(dsm_data.low_pulse_occupancy_ratio_pm10 * 100.0) / 100.0;
+    if (sps30_data.isValid) {
+        JsonObject sps_json = jsonDoc["sps30"].to<JsonObject>();
+        
+        // Concentrações de Massa (PM1.0, PM2.5, PM4.0, PM10.0)
+        sps_json["pm1_0_ugm3"] = String(sps30_data.pm1_0, 2);
+        sps_json["pm2_5_ugm3"] = String(sps30_data.pm2_5, 2);
+        // sps_json["pm4_0_ugm3"] = String(sps30_data.pm4_0, 2);
+        sps_json["pm10_0_ugm3"] = String(sps30_data.pm10_0, 2);
+        
+        // sps_json["typical_size_um"] = String(sps30_data.typical_particle_size, 2);
     }
 
     if (gps_data.isValid) {
         JsonObject location_json = jsonDoc["location"].to<JsonObject>();
         location_json["latitude"] = serialized(String(gps_data.latitude, 6));
         location_json["longitude"] = serialized(String(gps_data.longitude, 6));
-        location_json["accuracy_m"] = round(gps_data.accuracy * 100.0) / 100.0; 
+        // location_json["accuracy_m"] = round(gps_data.accuracy * 100.0) / 100.0; 
 
-        location_json["satellites_used"] = gps_data.satellites_used;
+        // location_json["satellites_used"] = gps_data.satellites_used;
         
-        location_json["satellites_visible"] = gps_data.satellites_visible;
-        location_json["altitude_m"] = round(gps_data.altitude * 100.0) / 100.0;
+        // location_json["satellites_visible"] = gps_data.satellites_visible;
+        // location_json["altitude_m"] = round(gps_data.altitude * 100.0) / 100.0;
     }
+
+    JsonObject bat_json = jsonDoc["battery"].to<JsonObject>();
+    
+    bat_json["voltage_v"] = String(bat_data.voltage, 2);
+    bat_json["percentage"] = String(bat_data.percentage, 0); // Sem casas decimais
+    // bat_json["days_remaining"] = String(bat_data.days_remaining, 1);
 
     char jsonBuffer[1024];
     size_t n = serializeJson(jsonDoc, jsonBuffer);
@@ -434,17 +516,44 @@ static bool publish_data(
     SerialMon.print(F(" bytes): "));
     SerialMon.println(jsonBuffer);
 
-    mqtt_client.loop();
-    delay(100);
+    int publish_retries = 0;
+    bool publish_success = false;
 
-    if (mqtt_client.publish(AWS_IOT_PUBLISH_TOPIC, jsonBuffer)) { 
-        SerialMon.println(AWS_IOT_PUBLISH_TOPIC);
-        SerialMon.println(F("CommManager: Mensagem publicada no tópico com sucesso!"));
-        mqtt_client.loop();
+    while (!publish_success && publish_retries < 3) { // Tenta 3 vezes
+        if (publish_retries > 0) {
+            SerialMon.println(F("CommManager: Tentando novamente em 1s..."));
+            delay(1000); 
+        }
+
+        // 1. Garante que o cliente MQTT esteja ativo e processando antes de publicar
+        mqtt_client.loop(); 
         delay(500);
+
+        // 2. Tenta a publicação
+        if (mqtt_client.publish(AWS_IOT_PUBLISH_TOPIC, jsonBuffer)) {
+            publish_success = true;
+            break; // Publicação bem-sucedida
+        }
+
+        publish_retries++;
+    }
+    
+    // 3. Verificação Final
+    if (publish_success) { 
+        SerialMon.println(AWS_IOT_PUBLISH_TOPIC);
+        SerialMon.println(F("CommManager: Mensagem publicada (buffer)... Aguardando envio físico (5s)..."));
+        
+        // Mantém o loop() rodando por 5 segundos para garantir o envio
+        unsigned long startWait = millis();
+        while (millis() - startWait < 5000) {
+            mqtt_client.loop();
+            delay(100);
+        }
+        
+        SerialMon.println(F("CommManager: Envio físico concluído (presumivelmente)."));
         return true;
     } else {
-        SerialMon.print(F("CommManager: Falha ao publicar a mensagem. estado MQTT: "));
+        SerialMon.print(F("CommManager: FALHA FINAL ao publicar. estado MQTT: "));
         SerialMon.println(mqtt_client.state());
         return false;
     }
@@ -491,17 +600,11 @@ static void disconnect_and_powerdown_modem() {
 bool perform_communication_cycle(
     const SCD40_Data& scd_data,
     const MICS6814_Data& mics_data,
-    const DSM501A_Data& dsm_data,
+    const SPS30_Data& dsm_data,
+    const Battery_Data& bat_data,
     GPS_Data& out_gps_data
 ) {
     bool publication_successful = false;
-
-    //===========
-    int ntp_year = 0, ntp_month = 0, ntp_day = 0;
-    int ntp_hour = 0, ntp_min = 0, ntp_sec = 0;
-    float ntp_timezone = 0.0f;
-    bool time_synced = false;
-    String time_str;
 
     SerialMon.println(F("\n=== INICIANDO CICLO DE COMUNICAÇÃO ==="));
 
@@ -530,7 +633,7 @@ bool perform_communication_cycle(
     }
 
     SerialMon.println(F("Comm. Cycle: Publicando dados dos sensores..."));
-    if (publish_data(scd_data, mics_data, dsm_data, out_gps_data)) {
+    if (publish_data(scd_data, mics_data, dsm_data, bat_data, out_gps_data)) {
         SerialMon.println(F("Comm. Cycle: Publicação de dados BEM-SUCEDIDA."));
         publication_successful = true; 
     } else {
