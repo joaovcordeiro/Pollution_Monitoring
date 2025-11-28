@@ -17,7 +17,6 @@ GPS_Data gpsLocationData;
 SPS30_Data sps30SensorData;
 Battery_Data batteryData;
 
-
 void setup() {
     Serial.begin(115200);
     delay(2000);
@@ -29,9 +28,9 @@ void setup() {
     setup_sensor_power(); // Configura o pino do MOSFET para controle de energia dos sensores
 
     // // ETAPA 1: Ligar, Ler e Desligar Sensores
-    Serial.println(F("Main: Powering ON sensors..."));
     // // para o pré-aquecimento do MICS6814 e SPS30 
     power_sensors_on(); 
+    delay(2000);
 
     if (!ads1115_init(0x48)) { // 0x48 é o endereço (ADDR no GND)
         Serial.println(F("Main: FALHA CRÍTICA - ADS1115 não encontrado."));

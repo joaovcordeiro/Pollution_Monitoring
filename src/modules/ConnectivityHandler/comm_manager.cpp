@@ -541,7 +541,7 @@ static bool publish_data(
     // 3. Verificação Final
     if (publish_success) { 
         SerialMon.println(AWS_IOT_PUBLISH_TOPIC);
-        SerialMon.println(F("CommManager: Mensagem publicada (buffer)... Aguardando envio físico (5s)..."));
+        SerialMon.println(F("CommManager: Mensagem publicada (buffer)... "));
         
         // Mantém o loop() rodando por 5 segundos para garantir o envio
         unsigned long startWait = millis();
@@ -550,7 +550,7 @@ static bool publish_data(
             delay(100);
         }
         
-        SerialMon.println(F("CommManager: Envio físico concluído (presumivelmente)."));
+        SerialMon.println(F("CommManager: Envio físico concluído."));
         return true;
     } else {
         SerialMon.print(F("CommManager: FALHA FINAL ao publicar. estado MQTT: "));
