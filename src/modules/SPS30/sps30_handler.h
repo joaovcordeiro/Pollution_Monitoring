@@ -4,32 +4,41 @@
 #include <Arduino.h>
 #include <SensirionI2cSps30.h> 
 
+// Definição de callback para checar bateria durante a operação
+using PowerOkFn = bool (*)();
+
 struct SPS30_Data {
     // Concentrações de Massa (µg/m³)
     float pm1_0;
     float pm2_5;
     float pm4_0;
     float pm10_0;
-
-    // Outros dados
     float typical_particle_size; 
-    
     bool isValid; 
 };
 
+struct SPS30_ReadConfig {
+    uint8_t target_samples = 30;          // Quantas leituras válidas queremos
+    uint16_t max_seconds = 45;            // Timeout total (em segundos)
+    uint8_t min_valid_samples = 20;       // Mínimo aceitável
+    bool stop_measurement_after_read = true; // OBRIGATÓRIO true para bateria
+    PowerOkFn power_ok = nullptr;         // Função para abortar se bateria cair
+};
+
 /**
- * @brief Inicializa o sensor SPS30 (laser particle sensor).
- * * Tenta estabelecer comunicação com o sensor e inicia o modo de medição periódica.
- * @return true se a inicialização for bem-sucedida, false caso contrário.
+ * @brief Inicializa o SPS30, verifica conexão e coloca em DEEP SLEEP.
+ * @return true se o sensor foi detectado.
  */
 bool sps30_init();
 
 /**
- * @brief Realiza a leitura dos dados do sensor SPS30.
- * * Faz polling para garantir que os dados de PM estão disponíveis (sensor estabilizado).
- * @param data Referência para a estrutura SPS30_Data onde os dados serão armazenados.
- * @return true se novos dados foram lidos com sucesso, false caso contrário.
+ * @brief Ciclo completo: Acorda -> Liga Fan -> Mede -> Para Fan -> Dorme.
+ * @return true se obteve sucesso.
  */
-bool sps30_read_measurements(SPS30_Data &data);
+bool sps30_read_measurements(SPS30_Data &data, const SPS30_ReadConfig &cfg);
+
+// Funções auxiliares públicas para controle manual se necessário
+void sps30_force_sleep();
+void sps30_force_wakeup();
 
 #endif // SPS30_HANDLER_H

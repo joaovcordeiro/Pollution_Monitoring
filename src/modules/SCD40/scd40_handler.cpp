@@ -16,27 +16,13 @@ bool scd40_init() {
 
     error = scd4x.stopPeriodicMeasurement();
     if (error) {
-        Serial.print("SCD40: AVISO - stopPeriodicMeasurement() falhou. ");
-        errorToString(error, errorMessage, 256);
-        Serial.println(errorMessage);
-        // Nota: Esta falha pode ser a primeira indicação de que o sensor
-        // não está conectado. Continuamos mesmo assim, pois o start()
-        // será a verificação definitiva.
+        // Apenas aviso, pois se já estiver parado, pode retornar erro.
+        Serial.println("SCD40: AVISO - stopPeriodicMeasurement() falhou (Pode já estar parado).");
     }
 
     delay(500);
 
-    // Inicia a medição periódica (leituras a cada ~5 segundos por padrão)
-    error = scd4x.startPeriodicMeasurement();
-    if (error) {
-        Serial.print("SCD40: FALHA CRÍTICA - startPeriodicMeasurement() falhou: ");
-        errorToString(error, errorMessage, 256);
-        Serial.println(errorMessage);
-        return false; // Se não conseguirmos iniciar, o sensor está inacessível
-    }
-
-    Serial.println("SCD40: Medição periódica iniciada.");
-    Serial.println("SCD40: Inicialização bem-sucedida.");
+    Serial.println("SCD40: Inicialização bem-sucedida (Modo Idle).");
     return true;
 }
 
@@ -48,58 +34,66 @@ bool scd40_read_measurements(SCD40_Data &data) {
     data.isValid = false; 
     bool dataReady = false;
 
-    Serial.println("SCD40: Aguardando o flag 'Data Ready' (timeout max 5s)...");
-
-    for (int attempt = 0; attempt < 6; attempt++) {
-        error = scd4x.getDataReadyStatus(dataReady); 
-        if (error) {
-            Serial.print("SCD40: FALHA CRÍTICA - Erro ao checar status (getDataReadyStatus): ");
-            errorToString(error, errorMessage, 256);
-            Serial.println(errorMessage);
-            return false; // Falha de comunicação I2C
-        }
-
-        if (dataReady) {
-            Serial.println("SCD40: Flag 'Data Ready' recebido.");
-            break; 
-        }
-
-        if (attempt < 5) {
-            Serial.println("SCD40: ...dados não estão prontos. Aguardando 1s.");
-            delay(1000);
-        }
+    // --- FASE 1: INICIAR MEDIÇÃO ---
+    // Inicia o ciclo periodicamente apenas quando for ler
+    error = scd4x.startPeriodicMeasurement();
+    if (error) {
+        Serial.println("SCD40: FALHA CRÍTICA - Erro ao iniciar medição.");
+        return false;
     }
 
-    if (!dataReady) {
-        if (Serial) {
-            Serial.println("SCD40: FALHA - Timeout. Sensor não disponibilizou dados.");
+    Serial.print("SCD40: Aquecendo e lendo dados (5s)");
+
+    // --- FASE 2: AGUARDAR DADOS (Polling eficiente) ---
+    for (int attempt = 0; attempt < 12; attempt++) { 
+        error = scd4x.getDataReadyStatus(dataReady); 
+        
+        if (error) {
+            Serial.print("x"); // Erro de I2C
+        } else if (dataReady) {
+            break; // Sai do loop, dados prontos!
+        } else {
+            Serial.print("."); 
         }
+        
+        delay(500); 
+    }
+    Serial.println(); 
+
+    if (!dataReady) {
+        Serial.println("SCD40: FALHA - Timeout. Sensor não disponibilizou dados.");
+        scd4x.stopPeriodicMeasurement(); 
         return false; 
     }
 
+    // --- FASE 3: LER E PARAR ---
     uint16_t co2_ppm_uint; 
     float temperature_float;
     float humidity_float;
 
     error = scd4x.readMeasurement(co2_ppm_uint, temperature_float, humidity_float);
+    
+    scd4x.stopPeriodicMeasurement();
+
     if (error) {
-        Serial.print("SCD40: FALHA CRÍTICA - Erro ao ler a medição (readMeasurement):");
+        Serial.print("SCD40: FALHA CRÍTICA - Erro ao ler a medição: ");
         errorToString(error, errorMessage, 256);
         Serial.println(errorMessage);
         return false; 
     } 
     
-    // O valor 0 ppm é fisicamente improvável (atmosfera = ~420ppm).
     if (co2_ppm_uint == 0) { 
-        Serial.println("SCD40: Warning - Invalid CO2 reading (0 ppm). Sensor might still be stabilizing or error in reading.");
+        Serial.println("SCD40: AVISO - Leitura inválida (0 ppm). Sensor pode estar instável.");
         return false;
     }
 
-    // Atribui os valores lidos à estrutura de dados, convertendo CO2 para float.
+    // --- FASE 4: SALVAR DADOS ---
     data.co2 = static_cast<float>(co2_ppm_uint);
     data.temperature = temperature_float;
     data.humidity = humidity_float;
     data.isValid = true; 
+
+    Serial.printf("SCD40: Sucesso! CO2: %.0f ppm | Temp: %.1f C | Umid: %.1f %%\n", data.co2, data.temperature, data.humidity);
 
     return true;
 }

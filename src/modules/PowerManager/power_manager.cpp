@@ -71,6 +71,64 @@ float voltage_to_percentage(float voltage) {
     return 0.0f; // Abaixo do mínimo
 }
 
+ProfileConfig get_system_profile(float voltage) {
+    ProfileConfig cfg;
+
+    // 1. Determina o Perfil Baseado na Tensão
+    if (voltage < 3.55f) {
+        cfg.profile = PROFILE_ECONOMY;
+    } else if (voltage < 3.80f) {
+        cfg.profile = PROFILE_NORMAL;
+    } else {
+        cfg.profile = PROFILE_PERFORMANCE;
+    }
+
+    // 2. Preenche as regras de cada perfil
+    switch (cfg.profile) {
+        case PROFILE_PERFORMANCE: // > 3.80V
+            cfg.run_sps30 = true;
+            cfg.sps_samples = 30;     // Qualidade Max
+            cfg.sps_timeout = 45;
+            
+            cfg.run_mics = true;
+            cfg.mics_warmup_ms = 30000; // 30s Aquecimento
+            
+            cfg.run_scd40 = true;
+            cfg.run_gps = true;         // GPS Ativo
+            cfg.gps_timeout_ms = 60000;
+            break;
+
+        case PROFILE_NORMAL: // 3.55 - 3.80V
+            cfg.run_sps30 = true;
+            cfg.sps_samples = 15;     // Qualidade Média
+            cfg.sps_timeout = 25;
+            
+            cfg.run_mics = true;
+            cfg.mics_warmup_ms = 15000; // 15s (Mínimo aceitável)
+            
+            cfg.run_scd40 = true;
+            cfg.run_gps = true;       // GPS ainda roda
+            cfg.gps_timeout_ms = 30000; // Timeout menor
+            break;
+
+        case PROFILE_ECONOMY: // 3.40 - 3.55V
+            cfg.run_sps30 = true;
+            cfg.sps_samples = 5;      // Tiro Rápido (Snapshot)
+            cfg.sps_timeout = 15;
+            
+            cfg.run_mics = false;     // CORTE: Economiza ~40mA
+            cfg.mics_warmup_ms = 0;
+            
+            cfg.run_scd40 = true;     // SCD40 gasta pouco, mantém
+            cfg.run_gps = false;      // CORTE: GPS gasta muito
+            cfg.gps_timeout_ms = 0;
+            break;
+
+    }
+
+    return cfg;
+}
+
 /**
  * @brief Aplica filtro de média móvel para suavizar leituras
  * Reduz oscilações causadas por ruído ou variações de carga
@@ -135,11 +193,21 @@ float read_battery_voltage_raw() {
     return voltage;
 }
 
-void setup_sensor_power() {
+float get_battery_voltage_instant() {
+    return read_battery_voltage_raw(); 
+}
+
+
+void setup_power_pins() {
     // Configura pino de controle do MOSFET
-    pinMode(SENSOR_POWER_CTRL_PIN, OUTPUT);
+    pinMode(PIN_POWER_ANALOGIC_SENSOR, OUTPUT);
+    pinMode(PIN_MASTER_POWER , OUTPUT);
+
+
     // Para MOSFET Canal N (low-side), NÍVEL BAIXO desliga
-    digitalWrite(SENSOR_POWER_CTRL_PIN, LOW); 
+    digitalWrite(PIN_POWER_ANALOGIC_SENSOR, LOW);
+    digitalWrite(PIN_MASTER_POWER, LOW);
+
 
     // Configura pino do ADC
     pinMode(BATTERY_ADC_PIN, INPUT);
@@ -152,7 +220,7 @@ void setup_sensor_power() {
     adc_chars = (esp_adc_cal_characteristics_t*) calloc(1, sizeof(esp_adc_cal_characteristics_t));
 
     if (adc_chars == nullptr) {
-        if (Serial) Serial.println("❌ PowerManager: Falha ao alocar memória para ADC!");
+        if (Serial) Serial.println("PowerManager: Falha ao alocar memória para ADC!");
         return;
     }
 
@@ -166,86 +234,27 @@ void setup_sensor_power() {
     }
 }
 
-void power_sensors_on() {
-    if (Serial) {
-        Serial.println("PowerManager: Ligando sensores...");
-    }
-    // Para MOSFET Canal N (low-side), NÍVEL ALTO liga
-    digitalWrite(SENSOR_POWER_CTRL_PIN, HIGH);
-    
-    if (Serial) {
-        Serial.println("PowerManager: Sensores ligados.");
-    }
+void power_analogics_on() {
+    digitalWrite(PIN_POWER_ANALOGIC_SENSOR, HIGH);
+    delay(500);
 }
 
-void power_sensors_off() {
-    if (Serial) {
-        Serial.println("PowerManager: Desligando sensores...");
-    }
-    // Para MOSFET Canal N (low-side), NÍVEL BAIXO desliga
-    digitalWrite(SENSOR_POWER_CTRL_PIN, LOW);
-    delay(100); // Pequeno delay para garantir o corte total
-    if (Serial) {
-        Serial.println("PowerManager: Sensores desligados.");
-    }
+void power_analogics_off() {
+    digitalWrite(PIN_POWER_ANALOGIC_SENSOR, LOW);
+    delay(500);
 }
 
-void get_battery_status(Battery_Data &data) {
-    // 1. Leitura bruta da tensão
-    float voltage_raw = read_battery_voltage_raw();
-    
-    // 2. Aplicar filtro de média móvel
-    float voltage_filtered = apply_moving_average(voltage_raw);
-    
-    data.voltage = voltage_filtered;
-    
-    // ==================== DETECÇÃO USB ====================
-    if (voltage_filtered < USB_DETECTION_THRESHOLD) {
-        data.is_usb_connected = true;
-        data.percentage = 0.0f;
-        data.days_remaining = 0.0f;
-        data.is_critical = false;
-        
-        if (Serial) {
-            Serial.println("   Status: 🔌 USB conectado (carregando ou sem bateria)");
-        }
-        return;
-    }
-    
-    data.is_usb_connected = false;
-    
-    // ==================== PROTEÇÃO DEEP DISCHARGE ====================
-    if (voltage_filtered < BATTERY_CUTOFF_VOLTAGE) {
-        data.percentage = 0.0f;
-        data.days_remaining = 0.0f;
-        data.is_critical = true;
-        
-        if (Serial) {
-            Serial.println("   ⚠️ CRÍTICO: Tensão abaixo do limite de segurança!");
-            Serial.printf("   ⚠️ Tensão atual: %.2fV | Mínimo: %.2fV\n", 
-                         voltage_filtered, BATTERY_CUTOFF_VOLTAGE);
-            Serial.println("   ⚠️ Sistema entrará em deep sleep para proteger bateria.");
-        }
-        
-        // OPCIONAL: Descomente para forçar deep sleep em tensão crítica
-        enter_deep_sleep();
-        return;
-    }
-    
-    // ==================== CÁLCULO DE PORCENTAGEM ====================
-    data.percentage = voltage_to_percentage(voltage_filtered);
-    data.is_critical = (data.percentage < 10.0f);
-    
-    // ==================== CÁLCULO DE AUTONOMIA ====================
-    float remaining_capacity_mah = BATTERY_CAPACITY_MAH * (data.percentage / 100.0f);
-    float daily_consumption_mah = SYSTEM_AVG_CONSUMPTION_MA * 24.0f;
-    
-    if (daily_consumption_mah > 0) {
-        data.days_remaining = remaining_capacity_mah / daily_consumption_mah;
-    } else {
-        data.days_remaining = 0.0f;
-    }
+void power_booster_on() {
+    digitalWrite(PIN_MASTER_POWER, HIGH);
+    delay(500);
 }
+
+void power_booster_off() {
+    digitalWrite(PIN_MASTER_POWER, LOW);
+    delay(500);
+}
+
+
 
 void enter_deep_sleep() {
     uint64_t sleep_time_us = TIME_TO_SLEEP_INTERVAL_MINUTES * MINUTES_TO_uS_FACTOR;

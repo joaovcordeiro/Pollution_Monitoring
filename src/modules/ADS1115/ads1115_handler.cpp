@@ -1,75 +1,129 @@
 #include "ads1115_handler.h"
 #include <Wire.h>     
 #include <Adafruit_ADS1X15.h>
+#include <vector>
+#include <algorithm>
+
+#define BATTERY_CORRECTION_FACTOR  1.0033f 
 
 Adafruit_ADS1115 ads; 
 
-
-// O seu módulo MICS é alimentado por 5V. As saídas analógicas
-// dele também podem chegar a 5V.
-// O ADS1115 também está em 5V. Portanto, precisamos de um ganho (PGA)
-// que possa ler com segurança até 5V (ou mais).
-// GAIN_TWOTHIRDS cobre +/- 6.144V. É a escolha correta.
+// Configuração de Ganho: GAIN_TWOTHIRDS (+/- 6.144V)
+// Necessário para ler Bateria (4.2V) e Sensores 5V sem saturar.
 const adsGain_t ADC_GAIN = GAIN_TWOTHIRDS;
 
-// Esta é a "constante mágica" para converter o valor RAW em Volts.
-// É o V_max (6.144V) dividido pelo valor RAW máximo (32767).
-// (6.144 / 32767.0 = 0.0001875)
-const float VOLTAGE_MULTIPLIER_16BIT_6V = 0.0001875f;
 
-/**
- * @brief Inicializa o sensor ADS1115. (Função pública do .h)
- */
+// Fator de Conversão: 6.144V / 32767 = 0.0001875 V/bit
+const float VOLTAGE_MULTIPLIER = 0.0001875f;
+
+bool _check_ads_connection(uint8_t addr) {
+    Wire.beginTransmission(addr);
+    uint8_t error = Wire.endTransmission();
+    if (error == 0) return true; // Sucesso (ACK)
+    
+    // Se error != 0 (NACK, Timeout, etc)
+    Serial.printf("[ADS] Check falhou. Wire.endTransmission = %d\n", error);
+    return false;
+}
+
+// --- FUNÇÃO AUXILIAR DE RESET DO BARRAMENTO (Privada) ---
+void _reset_i2c_bus() {
+    Serial.println("[ADS] ! Erro I2C detectado. Resetando barramento...");
+    Wire.end();
+    delay(50);
+    Wire.begin();
+    Wire.setClock(10000);   // Clock conservador 10kHz
+    Wire.setTimeOut(3000);  // Timeout longo
+    delay(100);
+}
+
 bool ads1115_init(uint8_t i2c_address) {
-    Serial.printf("ADS1115: Tentando inicializar no endereço I2C 0x%X...\n", i2c_address);
+    Serial.printf("[ADS] Iniciando no endereço 0x%X...\n", i2c_address);
     
-    // Passamos o ponteiro &Wire para a biblioteca
-    if (!ads.begin(i2c_address, &Wire)) {
-        Serial.println("ADS1115: FALHA CRÍTICA - Não foi possível encontrar o ADC.");
-        return false;
-    }
+    if (!_check_ads_connection(i2c_address)) {
+            Serial.println("[ADS] Sensor não detectado no teste preliminar.");
+            _reset_i2c_bus();
+        }
 
-    // Define o ganho que escolhemos
-    ads.setGain(ADC_GAIN);
-    
-    // Opcional: Aumentar a taxa de dados. 860 amostras por segundo
-    // torna nossa leitura de 32 amostras (próxima função) mais rápida.
-    ads.setDataRate(RATE_ADS1115_860SPS);
+        if (!ads.begin(i2c_address, &Wire)) {
+            Serial.println("[ADS] Falha no ads.begin().");
+            return false;
+        }
 
-    Serial.printf("ADS1115: Inicialização bem-sucedida no endereço 0x%X.\n", i2c_address);
-    Serial.printf("ADS1115: Ganho de hardware definido para: 2/3 (FS +/-6.144V)\n");
-    return true;
+        ads.setGain(ADC_GAIN);
+        ads.setDataRate(RATE_ADS1115_860SPS);
+        return true;
 }
 
-/**
- * @brief Lê um canal analógico de forma robusta. (Função pública do .h)
- */
-int16_t ads1115_read_stable_raw_value(ads_channel_t channel) {
+float ads1115_read_median_voltage(int channel) {
+    const int NUM_SAMPLES = 11; 
+    const uint8_t ADS_ADDR = 0x48;
     
-    // Esta é a lógica de "oversampling" que encontramos no driver profissional.
-    // Ela filtra ruídos elétricos (ex: do aquecedor do MICS).
-    const int NUM_SAMPLES = 32;
-    
-    // Usamos int32_t para o acumulador para evitar "estouro" (overflow)
-    int32_t adc_sum = 0; 
+    if (!_check_ads_connection(ADS_ADDR)) {
+        Serial.println("[ADS] Erro: Sensor desconectado antes da leitura.");
+        _reset_i2c_bus();
+        return -1.0;
+    }
 
-    // 1. Lê o ADC 32 vezes o mais rápido possível
+    std::vector<float> samples;
+    
     for (int i = 0; i < NUM_SAMPLES; i++) {
-        // A biblioteca da Adafruit mapeia 0, 1, 2, 3 para os canais
-        adc_sum += (int32_t)ads.readADC_SingleEnded(channel);
+        int16_t raw = ads.readADC_SingleEnded(channel);
+        
+        // Converte para tensão imediatamente para facilitar debug
+        // Assumindo ganho padrão +/- 4.096V (1 bit = 0.125mV) ou +/- 6.144V (1 bit = 0.1875mV)
+        // Verifique o Ganho configurado no seu setup!
+        // Exemplo para GAIN_ONE (+/- 4.096V): multiplier = 0.000125
+        float sample_volts = ads1115_convert_to_voltage(raw); 
+
+        if (sample_volts > 0.5) { 
+            samples.push_back(sample_volts);
+        }
+        delay(2); 
     }
 
-    // 2. Retorna a média.
-    //    (adc_sum >> 5) é uma forma muito rápida (bit-shift) 
-    //    de fazer (adc_sum / 32).
-    return (int16_t)(adc_sum >> 5);
+    if (samples.empty()) return -1.0; // Falha total
+
+    // 2. Ordena o vetor (Bubble sort ou std::sort)
+    std::sort(samples.begin(), samples.end());
+
+    // 3. Pega o valor do meio (Mediana)
+    int middle_index = samples.size() / 2;
+    float median_value = samples[middle_index];
+
+    return median_value;
 }
 
-/**
- * @brief Converte um valor RAW para Volts. (Função pública do .h)
- */
 float ads1115_convert_to_voltage(int16_t raw_adc_value) {
-    // Apenas para fins de log e publicação, se necessário.
-    // O módulo MICS6814 usará o valor RAW.
-    return (float)raw_adc_value * VOLTAGE_MULTIPLIER_16BIT_6V;
+    return (float)raw_adc_value * VOLTAGE_MULTIPLIER;
+}
+
+float ads1115_read_battery_voltage() {
+    float voltage = ads1115_read_median_voltage(ADS_CHANNEL_BATTERY);
+    
+    if (voltage < 0) return 0.0f; // Erro
+
+    return voltage * BATTERY_CORRECTION_FACTOR;
+}
+
+int16_t ads1115_read_robust(ads_channel_t channel) { // ou ads_channel_t se for enum
+    const int NUM_SAMPLES = 11; 
+    std::vector<int16_t> samples;
+    
+    // Coleta 11 amostras rápidas
+    for (int i = 0; i < NUM_SAMPLES; i++) {
+        int16_t val = ads.readADC_SingleEnded(channel);
+        if (val > 0) { // Ignora falhas bizarras de leitura
+            samples.push_back(val);
+        }
+        delay(2);
+    }
+
+    if (samples.empty()) {
+        return -1; // Retorna erro se falhar todas
+    }
+
+    // Ordena e pega a mediana (ignora picos de ruído)
+    std::sort(samples.begin(), samples.end());
+    return samples[samples.size() / 2];
 }

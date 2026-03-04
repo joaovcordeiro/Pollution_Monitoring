@@ -1,0 +1,88 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include "config.h"
+#include "modules/PowerManager/power_manager.h"
+#include "modules/SCD40/scd40_handler.h"
+#include "modules/MICS6814/mics6814_handler.h" 
+#include "modules/ConnectivityHandler/comm_manager.h"
+#include "modules/SPS30/sps30_handler.h"
+#include "modules/ADS1115/ads1115_handler.h" // Seu novo arquivo refatorado
+
+// --- CALIBRAÇÃO DE TENSÃO ---
+// Ajuste este valor SE a leitura do ADS for diferente do multímetro.
+// Fórmula: Fator = (Tensão Multímetro) / (Tensão ADS)
+// Ex: Se Multimetro=4.20V e ADS=4.15V -> Fator = 1.012
+#define BATTERY_CORRECTION_FACTOR  1.0033f 
+
+// --- Configuração de Deep Sleep ---
+#define TIME_TO_SLEEP_SEC 10 // Dorme 10s para testes rápidos de boot
+
+
+// Função Wrapper para ler bateria com correção
+float get_calibrated_voltage() {
+    float raw_volts = ads1115_read_battery_voltage();
+    return raw_volts * BATTERY_CORRECTION_FACTOR;
+}
+
+void setup() {
+    // 1. Inicialização Básica
+    Serial.begin(115200);
+    delay(1000); // Delay para pegar o serial no boot
+    Serial.println(F("\n\n--- System Boot: TESTE DE TENSÃO (ADS1115) ---"));
+
+    // 2. Configuração Robusta do I2C (Vital para o ADS não falhar)
+    Wire.begin(); 
+    Wire.setClock(10000);   // 10kHz (Estabilidade máxima)
+    Wire.setTimeOut(3000);  // 3s tolerância (Evita Error 263)
+
+    // 3. Segurança Híbrida: Garante que o MICS (Aquecedor) esteja OFF
+    pinMode(PIN_POWER_ANALOGIC_SENSOR, OUTPUT);
+    digitalWrite(PIN_POWER_ANALOGIC_SENSOR, LOW); 
+    Serial.println(F("PowerManager: MICS MOSFET desligado (Segurança)."));
+
+    // 4. Inicializa ADS1115
+    if (!ads1115_init(0x48)) {
+        Serial.println(F("Main: FALHA CRÍTICA - ADS1115 não respondeu."));
+        Serial.println(F("Main: Verifique fios SDA/SCL e alimentação 5V do ADS."));
+        
+        // Se falhar o ADS, pisca led ou tenta resetar, depois dorme
+        delay(5000);
+        esp_deep_sleep_start();
+    }
+
+    // 5. Loop de Teste de Leitura (Para você calibrar)
+    // Lê 5 vezes para verificar estabilidade
+    Serial.println(F("Main: Iniciando leituras de bateria..."));
+    
+    for (int i = 0; i < 5; i++) {
+        float volts = get_calibrated_voltage();
+        
+        Serial.printf("[Leitura %d/5] Tensão: %.3f V ", i+1, volts);
+        
+        // Diagnóstico rápido de níveis
+        if (volts > 4.1) Serial.print("(Carregada)");
+        else if (volts > 3.7) Serial.print("(Nominal)");
+        else Serial.print("(Baixa/Crítica)");
+        
+        Serial.println();
+        delay(1000); // 1 segundo entre leituras
+    }
+
+    
+    // --- ÁREA RESTRITA: Outros sensores desligados neste teste ---
+    Serial.println(F("------------------------------------------------"));
+    Serial.println(F("Main: Sensores SPS30, SCD40 e MICS ignorados neste teste."));
+    Serial.println(F("Main: Verifique se a tensão acima bate com o multímetro."));
+    Serial.println(F("------------------------------------------------"));
+
+    // 6. Dormir
+    Serial.printf("Main: Dormindo por %d segundos...\n", TIME_TO_SLEEP_SEC);
+    Serial.flush(); // Garante que o texto saia antes de desligar
+    
+    esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP_SEC * 1000000ULL);
+    esp_deep_sleep_start();
+}
+
+void loop() {
+    // Vazio no Deep Sleep
+}

@@ -33,6 +33,36 @@ struct Battery_Data {
     bool is_critical;       // true = carga < 10% (estado crítico)
 };
 
+// Definição dos Perfis
+typedef enum {
+    PROFILE_ECONOMY,      // 3.40V - 3.55V
+    PROFILE_NORMAL,       // 3.55V - 3.80V
+    PROFILE_PERFORMANCE   // > 3.80V
+} SystemProfile;
+
+// Configuração Dinâmica (O que roda em cada perfil)
+struct ProfileConfig {
+    SystemProfile profile;
+    
+    // SPS30
+    bool run_sps30;
+    uint8_t sps_samples;
+    uint16_t sps_timeout;
+    
+    // MICS6814
+    bool run_mics;
+    uint32_t mics_warmup_ms;
+    
+    // SCD40
+    bool run_scd40;
+    
+    // GPS
+    bool run_gps;
+    uint32_t gps_timeout_ms;
+};
+
+ProfileConfig get_system_profile(float voltage);
+
 /**
  * @brief Inicializa sistema de gerenciamento de energia
  * 
@@ -43,7 +73,7 @@ struct Battery_Data {
  * 
  * Deve ser chamado UMA VEZ no setup()
  */
-void setup_sensor_power();
+void setup_power_pins();
 
 /**
  * @brief Liga alimentação dos sensores via MOSFET
@@ -52,7 +82,7 @@ void setup_sensor_power();
  * - HIGH = Sensores ligados
  * - LOW = Sensores desligados
  */
-void power_sensors_on();
+void power_analogics_on();
 
 /**
  * @brief Desliga alimentação dos sensores via MOSFET
@@ -60,24 +90,19 @@ void power_sensors_on();
  * Inclui delay de 100ms para garantir corte completo
  * antes de processar próxima operação.
  */
-void power_sensors_off();
+void power_analogics_off();
+
+void power_booster_off();
+
+void power_booster_on();
+
+
 
 /**
- * @brief Obtém status completo da bateria
- * 
- * Executa:
- * 1. Leitura ADC com oversampling (32 amostras)
- * 2. Filtro de média móvel (5 leituras históricas)
- * 3. Detecção de USB vs bateria
- * 4. Cálculo de porcentagem (curva não-linear)
- * 5. Estimativa de autonomia
- * 6. Verificação de estado crítico
- * 
- * @param data Estrutura Battery_Data preenchida com os resultados
- * 
- * Tempo de execução: ~16ms (otimizado)
+ * @brief Lê a tensão da bateria sem filtro (instantâneo)
+ * Útil para detectar queda rápida (sag) durante picos de corrente.
  */
-void get_battery_status(Battery_Data &data);
+float get_battery_voltage_instant();
 
 /**
  * @brief Entra em modo Deep Sleep
@@ -134,5 +159,7 @@ void calibrate_battery_adc(float measured_voltage);
  * - Monitoramento durante testes
  */
 void print_power_diagnostics();
+
+float voltage_to_percentage(float voltage);
 
 #endif // POWER_MANAGER_H
