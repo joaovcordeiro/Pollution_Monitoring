@@ -7,4 +7,3 @@ src/secrets.h
 *.pem
 *.key
 *.crt
-src/config.h
