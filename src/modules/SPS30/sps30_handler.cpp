@@ -93,6 +93,14 @@ bool sps30_read_measurements(SPS30_Data &data, const SPS30_ReadConfig &cfg) {
         return false;
     }
 
+    // [FIX] Grace period após ligar o fan para a tensão estabilizar.
+    // O inrush current do fan causa um sag que se recupera em ~2s.
+    // Não verificamos bateria durante esse período para evitar falsos positivos.
+    const uint16_t FAN_STABILIZATION_MS = 2000;
+    Serial.printf("[SPS30] Fan ligado. Aguardando estabilização (%dms)...\n", FAN_STABILIZATION_MS);
+    delay(FAN_STABILIZATION_MS);
+
+
     Serial.printf("[SPS30] Aquecendo (%ds) e Coletando (Target: %d)...\n", SAMPLES_TO_DISCARD, cfg.target_samples);
 
     // --- FASE 2: LOOP DE COLETA ---

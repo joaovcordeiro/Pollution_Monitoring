@@ -74,6 +74,12 @@ float voltage_to_percentage(float voltage) {
 ProfileConfig get_system_profile(float voltage) {
     ProfileConfig cfg;
 
+    // Hierarquia de prioridade (último a ser cortado → primeiro):
+    // 1. SCD40  (CO₂, temp, umid)  — baixo consumo, sempre útil
+    // 2. SPS30  (material particulado) — consumo moderado, essencial
+    // 3. GPS    (localização) — consome tempo (~60-150s) e energia
+    // 4. MICS   (CO, NO₂, NH₃) — alto consumo (~40mA + 30-60s warmup), menos preciso
+
     // 1. Determina o Perfil Baseado na Tensão
     if (voltage < 3.55f) {
         cfg.profile = PROFILE_ECONOMY;
@@ -95,26 +101,26 @@ ProfileConfig get_system_profile(float voltage) {
             
             cfg.run_scd40 = true;
             cfg.run_gps = true;         // GPS Ativo
-            cfg.gps_timeout_ms = 60000;
+            cfg.gps_timeout_ms = 150000;
             break;
 
         case PROFILE_NORMAL: // 3.55 - 3.80V
             cfg.run_sps30 = true;
-            cfg.sps_samples = 15;     // Qualidade Média
-            cfg.sps_timeout = 25;
+            cfg.sps_samples = 25;     // Qualidade Média
+            cfg.sps_timeout = 30;
             
-            cfg.run_mics = true;
-            cfg.mics_warmup_ms = 15000; // 15s (Mínimo aceitável)
+            cfg.run_mics = false;
+            cfg.mics_warmup_ms = 0; 
             
             cfg.run_scd40 = true;
             cfg.run_gps = true;       // GPS ainda roda
-            cfg.gps_timeout_ms = 30000; // Timeout menor
+            cfg.gps_timeout_ms = 120000; // Timeout menor
             break;
 
         case PROFILE_ECONOMY: // 3.40 - 3.55V
             cfg.run_sps30 = true;
-            cfg.sps_samples = 5;      // Tiro Rápido (Snapshot)
-            cfg.sps_timeout = 15;
+            cfg.sps_samples = 15;      // Tiro Rápido (Snapshot)
+            cfg.sps_timeout = 20;
             
             cfg.run_mics = false;     // CORTE: Economiza ~40mA
             cfg.mics_warmup_ms = 0;
@@ -217,7 +223,7 @@ void setup_power_pins() {
     adc1_config_channel_atten(BATTERY_ADC_CHANNEL, BATTERY_ADC_ATTEN);
 
     // Aloca memória para a estrutura de calibração
-    adc_chars = (esp_adc_cal_characteristics_t*) calloc(1, sizeof(esp_adc_cal_characteristics_t));
+    adc_chars = (esp_adc_cal_characteristics_t*) calloc(1, sizeof(esp_adc_cal_characteristics_t)); 
 
     if (adc_chars == nullptr) {
         if (Serial) Serial.println("PowerManager: Falha ao alocar memória para ADC!");
@@ -269,7 +275,7 @@ void enter_deep_sleep() {
     esp_sleep_enable_timer_wakeup(sleep_time_us);
     
     esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_OFF);
-    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_SLOW_MEM, ESP_PD_OPTION_OFF);
+    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_SLOW_MEM, ESP_PD_OPTION_ON);
     esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_FAST_MEM, ESP_PD_OPTION_OFF);
 
     // Inicia o Deep Sleep

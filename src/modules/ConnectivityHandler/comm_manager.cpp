@@ -367,6 +367,40 @@ static bool synchronize_time_with_ntp() {
 
 
 /**
+ * @brief (Função Privada) Testa se há conectividade IP real (não apenas GPRS ativo).
+ * 
+ * Quando o SIM está sem crédito/dados, o GPRS conecta normalmente (obtém IP),
+ * mas o tráfego não passa. Esta função detecta isso antes de gastar tempo
+ * com o handshake TLS (~5s por tentativa).
+ * 
+ * @return true se conseguiu resolver DNS ou alcançar a rede, false caso contrário.
+ */
+static bool verify_internet_connectivity() {
+    SerialMon.println(F("CommManager: Verificando conectividade IP real..."));
+
+    // Teste 1: Verifica se GPRS ainda está conectado
+    if (!modem.isGprsConnected()) {
+        SerialMon.println(F("CommManager: GPRS desconectado!"));
+        return false;
+    }
+
+    // Teste 2: Tenta um HTTP GET simples para verificar se os dados passam.
+    modem.sendAT(F("+CDNSGIP=\"pool.ntp.org\""));
+    int dns_result = modem.waitResponse(10000L);
+    
+    if (dns_result == 1) {
+        SerialMon.println(F("CommManager: Conectividade IP confirmada (DNS OK)."));
+        return true;
+    }
+    
+    SerialMon.println(F("CommManager: AVISO - DNS falhou. Possível falta de crédito/dados no SIM."));
+    return false;
+
+
+}
+
+
+/**
  * @brief (Função Privada) Configura o cliente SSL e conecta ao AWS IoT via MQTT.
  *
  * Esta função carrega os certificados (CA, Certificado, Chave Privada)
@@ -381,6 +415,14 @@ static bool connect_aws_iot() {
 
     // Log de Heap: Para depurar falhas de alocação de memória SSL
     SerialMon.printf("CommManager: Free Heap antes da configuração SSL: %u\n", ESP.getFreeHeap());
+
+    // Verifica conectividade real antes do handshake TLS (caro em tempo/energia)
+    if (!verify_internet_connectivity()) {
+        SerialMon.println(F("CommManager: Sem conectividade IP. Abortando SSL/MQTT."));
+        SerialMon.println(F("CommManager: Verifique crédito/dados do SIM."));
+        return false;
+    }
+
     SerialMon.println(F("CommManager: Configurando SSL/TLS para o AWS IoT..."));
 
     // 1. Configura os certificados para o cliente SSL
@@ -394,26 +436,46 @@ static bool connect_aws_iot() {
     mqtt_client.setBufferSize(512); // Aumenta o buffer 
 
     SerialMon.print(F("CommManager: Tentando conexão MQTT com o AWS IoT..."));
+    const int MAX_MQTT_RETRIES = 3;
     int retries = 0;
 
-    while (!mqtt_client.connected() && retries < 5) {
-        SerialMon.printf(" (Tentativa %d/3)\n", retries + 1);
-        SerialMon.printf("CommManager: Free Heap antes da chamada de conexão MQTT: %u\n", ESP.getFreeHeap());
-
+    while (!mqtt_client.connected() && retries < MAX_MQTT_RETRIES) {
+        SerialMon.printf(" (Tentativa %d/%d)\n", retries + 1, MAX_MQTT_RETRIES);
+        SerialMon.printf("CommManager: Free Heap: %u\n", ESP.getFreeHeap());
+ 
         if (mqtt_client.connect(AWS_IOT_CLIENT_ID)) {
             SerialMon.println(F("CommManager: MQTT conectado com o AWS IoT!"));
             return true;
         } else {
-            SerialMon.print(F("CommManager: conexão MQTT falhou, rc="));
-            SerialMon.print(mqtt_client.state()); 
-            SerialMon.println(F(". Tentando novamente em 5 segundos..."));
+            int mqtt_state = mqtt_client.state();
+            SerialMon.printf("CommManager: MQTT falhou (rc=%d). ", mqtt_state);
+            
+            // Diagnóstico detalhado baseado no código de erro
+            switch (mqtt_state) {
+                case -4: SerialMon.println(F("Timeout na conexão.")); break;
+                case -3: SerialMon.println(F("Conexão perdida.")); break;
+                case -2: SerialMon.println(F("Falha no handshake SSL/TLS.")); break;
+                case -1: SerialMon.println(F("Desconectado.")); break;
+                case  1: SerialMon.println(F("Protocolo MQTT rejeitado.")); break;
+                case  2: SerialMon.println(F("Client ID rejeitado.")); break;
+                case  3: SerialMon.println(F("Servidor indisponível.")); break;
+                case  4: SerialMon.println(F("Credenciais inválidas.")); break;
+                case  5: SerialMon.println(F("Não autorizado.")); break;
+                default: SerialMon.println(F("Erro desconhecido.")); break;
+            }
+            
+            // Se é erro SSL (-2), verifica se GPRS ainda está ativo
+            if (mqtt_state == -2 && !modem.isGprsConnected()) {
+                SerialMon.println(F("CommManager: GPRS caiu durante tentativa. Abortando."));
+                break;
+            }
             
             delay(5000);
             retries++;
         }
     }
 
-    SerialMon.println(F("CommManager: Falhou ao conectar ao AWS IoT após 5 tentativas."));
+    SerialMon.printf("CommManager: Falhou ao conectar ao AWS IoT após %d tentativas.\n", MAX_MQTT_RETRIES);
     return false;
 }
 
@@ -602,7 +664,8 @@ bool perform_communication_cycle(
     const MICS6814_Data& mics_data,
     const SPS30_Data& dsm_data,
     const Battery_Data& bat_data,
-    GPS_Data& out_gps_data
+    GPS_Data& out_gps_data,
+    const ProfileConfig& profile
 ) {
     bool publication_successful = false;
 
@@ -624,8 +687,72 @@ bool perform_communication_cycle(
         SerialMon.println(F("Comm. Cycle: Sincronização de relógio bem-sucedida."));
     }
     
-    SerialMon.println(F("Comm. Cycle: Tentando obter localização GPS..."));
-    get_gps_location(out_gps_data, 150);
+    // ==================== GPS (com cache RTC) ====================
+    // Lógica: O GPS só roda efetivamente a cada GPS_UPDATE_INTERVAL_HOURS.
+    // Entre os intervalos, reutiliza a última localização salva na memória RTC.
+    // A decisão é feita aqui (após NTP) pois precisamos do relógio para comparar.
+    
+    if (profile.run_gps) {
+        bool need_fresh_gps = true;
+    
+        
+        if (gps_cache.magic == 0xCAFE && gps_cache.timestamp_epoch > 0) {
+            time_t now;
+            time(&now);
+            uint32_t age_seconds = (uint32_t)now - gps_cache.timestamp_epoch;
+            uint32_t interval_seconds = GPS_UPDATE_INTERVAL_HOURS * 3600UL;
+            
+            if (age_seconds < interval_seconds) {
+                // Cache ainda é válido — reutilizar
+                float age_hours = (float)age_seconds / 3600.0f;
+                SerialMon.printf("Comm. Cycle: GPS cache válido (idade: %.1f h, limite: %d h). Reutilizando.\n", age_hours, GPS_UPDATE_INTERVAL_HOURS);
+                
+                out_gps_data.latitude  = gps_cache.latitude;
+                out_gps_data.longitude = gps_cache.longitude;
+                out_gps_data.accuracy  = gps_cache.accuracy;
+                out_gps_data.isValid   = true;
+                need_fresh_gps = false;
+            } else {
+                float age_hours = (float)age_seconds / 3600.0f;
+                SerialMon.printf("Comm. Cycle: GPS cache expirado (idade: %.1f h). Atualizando.\n", age_hours);
+            }
+        }
+        
+        if (need_fresh_gps) {
+            SerialMon.println(F("Comm. Cycle: Obtendo localização GPS fresca..."));
+            uint16_t gps_timeout = profile.gps_timeout_ms / 1000;
+            get_gps_location(out_gps_data, gps_timeout);
+            
+            // Se obteve fix, salva no cache RTC para os próximos ciclos
+            if (out_gps_data.isValid) {
+                save_gps_to_cache(out_gps_data);
+            }
+        }
+    } else {
+        SerialMon.println(F("Comm. Cycle: GPS OFF (Economia de Energia - Perfil)"));
+        
+        if (gps_cache.magic == 0xCAFE) {
+            out_gps_data.latitude  = gps_cache.latitude;
+            out_gps_data.longitude = gps_cache.longitude;
+            out_gps_data.accuracy  = gps_cache.accuracy;
+            out_gps_data.isValid   = true;
+            SerialMon.println(F("Comm. Cycle: Usando última localização conhecida do cache."));
+        } else {
+            out_gps_data.isValid = false;
+        }
+    }
+
+    // ==================== RECONEXÃO GPRS PÓS-GPS ====================
+    
+    if (!modem.isGprsConnected()) {
+        SerialMon.println(F("Comm. Cycle: GPRS caiu durante aquisição GPS. Reconectando..."));
+        
+        if (!connect_gprs()) {
+            SerialMon.println(F("Comm. Cycle: FALHA - Não foi possível reconectar GPRS."));
+            goto cleanup;
+        }
+        SerialMon.println(F("Comm. Cycle: GPRS reconectado com sucesso."));
+    }
 
     if (!connect_aws_iot()) {
         SerialMon.println(F("Comm. Cycle: FALHA CRÍTICA - Não foi possível conectar ao AWS IoT (MQTT)."));

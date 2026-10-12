@@ -19,6 +19,22 @@ struct GPS_Data {
     bool isValid = false;
 };
 
+#define GPS_CACHE_MAGIC  0xCAFE
+ 
+struct RTC_GPS_Cache {
+    uint16_t magic;              // GPS_CACHE_MAGIC se contém dados válidos
+    float    latitude;
+    float    longitude;
+    float    accuracy;
+    uint32_t timestamp_epoch;    // Epoch UTC do último fix
+    uint32_t boot_count;         // Boot em que o fix foi salvo
+};
+
+extern RTC_GPS_Cache gps_cache;
+extern uint32_t boot_count;
+extern void save_gps_to_cache(const GPS_Data& gps_data);
+
+
 /**
  * @brief Inicializa a(s) porta(s) serial e os pinos de controle de hardware
  * para comunicação com o modem.
@@ -51,7 +67,8 @@ bool perform_communication_cycle(
     const MICS6814_Data& mics_data,
     const SPS30_Data& sps30_data,
     const Battery_Data& bat_data,
-    GPS_Data& out_gps_data // Passado por referência para ser preenchido
+    GPS_Data& out_gps_data, // Passado por referência para ser preenchido
+    const ProfileConfig& cfg
 );
 
 

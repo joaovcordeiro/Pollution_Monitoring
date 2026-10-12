@@ -6,9 +6,9 @@
 
 typedef enum {
     ADS_CHANNEL_BATTERY = 0, // A0: Bateria Direta (via resistor 2.2k)
-    ADS_CHANNEL_MICS_NH3    = 2, // A1: Sensor NH3
-    ADS_CHANNEL_MICS_CO     = 1, // A2: Sensor CO
-    ADS_CHANNEL_MICS_NO2    = 3, // A3: Sensor NO2
+    ADS_CHANNEL_MICS_NH3    = 2, // A2: Sensor NH3
+    ADS_CHANNEL_MICS_CO     = 3, // A3: Sensor CO
+    ADS_CHANNEL_MICS_NO2    = 1, // A1: Sensor NO2
 } ads_channel_t;
 
 
